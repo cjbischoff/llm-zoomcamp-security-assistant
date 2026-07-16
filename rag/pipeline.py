@@ -1,8 +1,7 @@
 """Full RAG pipeline orchestration"""
 
 import time
-import asyncio
-from typing import AsyncGenerator, Dict, Any, List
+from typing import AsyncGenerator, Optional
 from rag.rewriter import QueryRewriter
 from rag.retrieval import DenseRetriever
 from rag.generator import LLMGenerator
@@ -34,8 +33,8 @@ class RAGPipeline:
     async def stream_answer(
         self,
         query: str,
-        user_id: str = None,
-        prompt_variant: str = "base",
+        user_id: Optional[str] = None,
+        prompt_variant: str = "practitioner",
         top_k: int = 5,
     ) -> AsyncGenerator[str, None]:
         """

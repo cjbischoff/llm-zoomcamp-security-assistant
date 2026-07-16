@@ -2,7 +2,7 @@
 
 import logging
 import os
-from typing import AsyncGenerator, List, Dict, Any
+from typing import AsyncGenerator, Dict
 from openai import AsyncOpenAI
 
 logger = logging.getLogger(__name__)

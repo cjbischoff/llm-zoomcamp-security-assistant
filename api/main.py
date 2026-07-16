@@ -2,7 +2,7 @@
 
 import os
 import logging
-from typing import AsyncGenerator
+from typing import AsyncGenerator, Optional
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
@@ -27,8 +27,8 @@ class QueryRequest(BaseModel):
     # bodies are rejected with a 422 before embedding/generation. Generous enough
     # for real security questions; full injection guardrails are HRD-02 (v2).
     query: str = Field(..., max_length=4000)
-    prompt_variant: str = "base"  # "base" or "practitioner"
-    user_id: str = None
+    prompt_variant: str = "practitioner"  # "practitioner" (default, D-05) or "base"
+    user_id: Optional[str] = None
 
 
 class HealthResponse(BaseModel):

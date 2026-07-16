@@ -2,7 +2,7 @@
 
 import logging
 import os
-from typing import List, Dict, Any
+from typing import Any, Dict, List, Optional
 from qdrant_client import QdrantClient
 from qdrant_client.http.exceptions import ResponseHandlingException, UnexpectedResponse
 
@@ -12,7 +12,7 @@ logger = logging.getLogger(__name__)
 class DenseRetriever:
     """Dense vector search using cosine similarity"""
 
-    def __init__(self, collection_name: str = None):
+    def __init__(self, collection_name: Optional[str] = None):
         self.collection_name = collection_name or os.getenv("QDRANT_COLLECTION_NAME", "security_rag")
         self.qdrant_host = os.getenv("QDRANT_HOST", "localhost")
         self.qdrant_port = int(os.getenv("QDRANT_PORT", 6333))
@@ -85,7 +85,7 @@ class BM25Retriever:
 class HybridRetriever:
     """Hybrid search combining dense + BM25 with RRF fusion and cross-encoder reranking"""
 
-    def __init__(self, collection_name: str = None):
+    def __init__(self, collection_name: Optional[str] = None):
         self.collection_name = collection_name or os.getenv("QDRANT_COLLECTION_NAME", "security_rag")
         self.dense = DenseRetriever(collection_name)
         self.bm25 = BM25Retriever()
