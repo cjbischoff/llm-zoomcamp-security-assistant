@@ -1,56 +1,93 @@
-"""dlt source for MCP Security Documentation (Web Scrape)"""
+"""dlt source for the MCP security best-practices doc (repo mdx, not HTML scrape)."""
 
-import dlt
-import requests
-from bs4 import BeautifulSoup
+import logging
+import subprocess
+import tempfile
+from datetime import datetime, timezone
+from pathlib import Path
 from typing import Generator
 
+import dlt
 
-@dlt.resource(name="mcp_security_docs", write_disposition="replace")
+logger = logging.getLogger(__name__)
+
+REPO_URL = "https://github.com/modelcontextprotocol/modelcontextprotocol"
+# The security doc lives in the MCP repo as .mdx — read it from the clone
+# instead of scraping the JS-rendered Mintlify site (which returns sparse text).
+SECURITY_DOC = "docs/docs/tutorials/security/security_best_practices.mdx"
+
+
+@dlt.resource(name="mcp_security_docs", write_disposition="merge", primary_key="doc_id")
 def fetch_mcp_security() -> Generator[dict, None, None]:
-    """
-    Scrape MCP security documentation from modelcontextprotocol.io.
+    """Clone the MCP repo and yield the security best-practices doc.
 
-    Focuses on threat modeling, best practices, and security considerations.
-    """
-    base_url = "https://modelcontextprotocol.io/specification/draft/basic/security_best_practices"
+    Reads ``security_best_practices.mdx`` from the cloned repo rather than
+    scraping the Mintlify site. Splits the doc on top-level markdown headings
+    into section rows.
 
+    Yields:
+        dict: A row with ``doc_id``, ``section_title``, ``content``,
+        ``source``, and ``fetched_at``.
+
+    Notes:
+        On any clone/read failure this logs a warning and yields nothing
+        (continue-and-report). The temp clone dir is always cleaned up.
+    """
     try:
-        response = requests.get(base_url, timeout=10)
-        response.raise_for_status()
-    except requests.RequestException as e:
-        print(f"Warning: Could not fetch MCP security docs: {e}")
+        with tempfile.TemporaryDirectory() as tmpdir:
+            subprocess.run(
+                ["git", "clone", "--depth", "1", REPO_URL, tmpdir],
+                check=True,
+                capture_output=True,
+            )
+            doc_path = Path(tmpdir) / SECURITY_DOC
+            if not doc_path.exists():
+                logger.warning("MCP security doc not found at %s", SECURITY_DOC)
+                return
+            text = doc_path.read_text(encoding="utf-8")
+
+            # Split on markdown H2 headings; keep a leading section for preamble.
+            title = "Security Best Practices"
+            buffer: list[str] = []
+            section_index = 0
+            for line in text.splitlines():
+                if line.startswith("## "):
+                    yield from _emit(section_index, title, buffer)
+                    section_index += 1
+                    title = line[3:].strip()
+                    buffer = []
+                else:
+                    buffer.append(line)
+            yield from _emit(section_index, title, buffer)
+    except Exception as e:  # noqa: BLE001 - continue-and-report
+        logger.warning("Source mcp_security_docs failed, skipping: %s", e)
         return
 
-    soup = BeautifulSoup(response.content, 'html.parser')
 
-    # Extract sections
-    section_counter = 0
-    for section in soup.find_all(['h2', 'h3']):
-        section_title = section.get_text().strip()
-        if not section_title:
-            continue
+def _emit(index: int, title: str, lines: list[str]) -> Generator[dict, None, None]:
+    """Yield a section row if it has non-empty content.
 
-        section_content = ""
-        for sibling in section.find_next_siblings():
-            if sibling.name in ['h2', 'h3']:
-                break
-            if sibling.name in ['p', 'ul', 'ol', 'pre', 'code']:
-                section_content += sibling.get_text() + "\n"
+    Args:
+        index: Zero-based section position within the doc.
+        title: Section heading text.
+        lines: Raw content lines for the section.
 
-        if section_content.strip():
-            section_counter += 1
-            yield {
-                "section_number": section_counter,
-                "section_title": section_title,
-                "content": section_content.strip(),
-                "source": "mcp_security_docs",
-                "url": base_url,
-                "fetched_at": dlt.current.run_started_at,
-            }
+    Yields:
+        dict: A merge-keyed section row, or nothing when the section is empty.
+    """
+    content = "\n".join(lines).strip()
+    if not content:
+        return
+    yield {
+        "doc_id": f"mcp_security::{index}",
+        "section_title": title,
+        "content": content,
+        "source": "mcp_security_docs",
+        "fetched_at": datetime.now(timezone.utc),
+    }
 
 
 @dlt.source
 def mcp_security_source():
-    """dlt source definition for MCP Security Docs"""
+    """dlt source definition for the MCP security docs."""
     return [fetch_mcp_security()]
