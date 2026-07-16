@@ -17,12 +17,12 @@ Ask a security question, get an accurate answer grounded in real retrieved sourc
 - ✓ Project scaffold + layered architecture (ingestion / rag / api / ui / monitoring / evaluation) — existing
 - ✓ Threat-ID mapping dictionary (OWASP/MCP/NIST canonical IDs) — existing
 - ✓ dlt source definitions for 5 corpora + docker-compose (Qdrant/Postgres/Grafana) — existing (unwired)
+- ✓ **Real ingestion (Phase 1):** dlt → Postgres staging → chunk → 1536-dim OpenAI embed → idempotent Qdrant upsert. `python ingestion/run_pipeline.py` populates **850 points** across all **5 distinct sources** (owasp_llm_top_10, owasp_agentic_top_10, mcp_protocol_spec, mcp_security_docs, nist_ai_rmf) at size=1536/cosine; re-run leaves the count unchanged (content-hash uuid5 IDs). REP-01 pins corrected; 20 pytest tests green.
 
 ### Active
 
 <!-- Hypotheses until shipped and validated. All currently stubbed. -->
 
-- [ ] Real ingestion: fetch 5 sources → chunk → embed → upsert into Qdrant (dlt-orchestrated, idempotent)
 - [ ] Real retrieval: dense vector search against populated Qdrant collection
 - [ ] Real generation: OpenAI streaming answers grounded in retrieved context, base + practitioner prompt variants
 - [ ] Bonus — hybrid search: dense + BM25 + RRF fusion
@@ -44,8 +44,8 @@ Ask a security question, get an accurate answer grounded in real retrieved sourc
 ## Context
 
 - **Grading target:** LLM Zoomcamp 2026 capstone rubric, aiming 22-25 points. Rubric: knowledge base, retrieval pipeline (multiple approaches), evaluation (retrieval + LLM), interface, monitoring+feedback, automated ingestion (dlt = +2), Docker (+1), bonuses (hybrid/rerank/rewriting), documentation.
-- **Current state:** 73-file scaffold. Correct interfaces, but nearly every module returns hardcoded placeholder data — RAG never retrieves, logging/metrics don't persist, `/metrics` import is broken, UI is a mockup, zero tests. See `.planning/codebase/CONCERNS.md`.
-- **Known dep risk:** `requirements.txt` pins appear wrong (`qdrant-client==2.7.0` non-existent, `openai==1.6.1` stale, several unused deps). Verify/bump before relying on them.
+- **Current state:** Phase 1 complete — ingestion is real: an 850-point, 1536/cosine, idempotent Qdrant collection populated from all 5 sources, with 20 pytest tests green. The remaining modules (retrieval, generation, API/UI, monitoring, evaluation) are still scaffold/placeholder — Phases 2-6. See `.planning/codebase/CONCERNS.md`.
+- **Dep pins:** Fixed in Phase 1 (REP-01) — `qdrant-client` 1.x, `pypdf` (replaced non-existent `PyPDF2==4.0.1`), `tiktoken` added; `uv pip compile` resolves 121 packages on Python 3.11.
 - **Rubric/plan references:** `/Users/christopher/Workspace/topic_zoomcamp-llm/synthesis/` (capstone plan + implementation guide); course rubric at github.com/DataTalksClub/llm-zoomcamp/blob/main/project.md.
 
 ## Constraints
@@ -60,7 +60,8 @@ Ask a security question, get an accurate answer grounded in real retrieved sourc
 
 | Decision | Rationale | Outcome |
 |----------|-----------|---------|
-| Finish scaffold rather than rewrite | Structure is sound; stubs need real impl, not redesign | — Pending |
+| Finish scaffold rather than rewrite | Structure is sound; stubs need real impl, not redesign | ✓ Validated (Phase 1 — ingestion shipped by extending stubs) |
+| OWASP Agentic ingested from OWASP crosswalk repo (ASI01–ASI10) | Primary Top-10 doc is a gated PDF; the GenAI Data Security Initiative crosswalk repo is the authoritative *fetchable* form | ✓ Phase 1 (rewriter THREAT_MAPPINGS→ASI remap deferred to Phase 3) |
 | Implement all 3 bonuses (hybrid+rerank, rewriting, doc rerank) | Needed to reach 22-25 pt target | — Pending |
 | Keep both FastAPI + Streamlit, wire them | Rubric interface item; Streamlit calls API for real | — Pending |
 | Pragmatic tests, not full TDD | Rubric doesn't grade tests; deadline pressure | — Pending |
@@ -84,4 +85,4 @@ This document evolves at phase transitions and milestone boundaries.
 4. Update Context with current state
 
 ---
-*Last updated: 2026-07-15 after initialization*
+*Last updated: 2026-07-16 after Phase 1 (Ingestion & Populated Knowledge Base) completion*
