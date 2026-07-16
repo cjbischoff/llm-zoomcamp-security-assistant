@@ -5,7 +5,7 @@ import logging
 from typing import AsyncGenerator
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import StreamingResponse
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -23,7 +23,10 @@ app = FastAPI(
 
 class QueryRequest(BaseModel):
     """Query request model"""
-    query: str
+    # Bound untrusted query at the trust boundary (Security V5, T-02-11): oversized
+    # bodies are rejected with a 422 before embedding/generation. Generous enough
+    # for real security questions; full injection guardrails are HRD-02 (v2).
+    query: str = Field(..., max_length=4000)
     prompt_variant: str = "base"  # "base" or "practitioner"
     user_id: str = None
 
