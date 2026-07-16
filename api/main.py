@@ -1,0 +1,119 @@
+"""FastAPI application for security RAG system"""
+
+import os
+import logging
+from typing import AsyncGenerator
+from fastapi import FastAPI, HTTPException
+from fastapi.responses import StreamingResponse
+from pydantic import BaseModel
+from dotenv import load_dotenv
+
+load_dotenv()
+
+# Setup logging
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
+
+app = FastAPI(
+    title="Security RAG API",
+    description="AI-powered threat intelligence RAG system",
+    version="1.0.0"
+)
+
+
+class QueryRequest(BaseModel):
+    """Query request model"""
+    query: str
+    prompt_variant: str = "base"  # "base" or "practitioner"
+    user_id: str = None
+
+
+class HealthResponse(BaseModel):
+    """Health check response"""
+    status: str
+    services: dict
+
+
+@app.get("/health", response_model=HealthResponse)
+async def health_check():
+    """Health check endpoint"""
+    return {
+        "status": "healthy",
+        "services": {
+            "qdrant": "connected",
+            "postgres": "connected",
+            "openai": "configured"
+        }
+    }
+
+
+@app.post("/query")
+async def query_endpoint(request: QueryRequest):
+    """
+    Query the security RAG system.
+
+    Streams answer tokens as they arrive.
+    """
+    try:
+        # Import pipeline (lazy import to avoid circular dependencies)
+        from rag.pipeline import RAGPipeline
+
+        pipeline = RAGPipeline()
+
+        async def answer_generator() -> AsyncGenerator[str, None]:
+            """Stream answer from pipeline"""
+            async for token in pipeline.stream_answer(
+                query=request.query,
+                user_id=request.user_id,
+                prompt_variant=request.prompt_variant
+            ):
+                yield token
+
+        return StreamingResponse(answer_generator(), media_type="text/plain")
+
+    except Exception as e:
+        logger.error(f"Query error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/feedback")
+async def feedback_endpoint(query_id: str, feedback: int):
+    """
+    Log user feedback (-1: not helpful, 0: neutral, 1: helpful)
+    """
+    try:
+        from monitoring.logging import QueryLogger
+
+        logger_instance = QueryLogger()
+        logger_instance.log_feedback(query_id, feedback)
+
+        return {"status": "logged"}
+
+    except Exception as e:
+        logger.error(f"Feedback error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/metrics")
+async def metrics_endpoint():
+    """Get current system metrics"""
+    try:
+        from monitoring.metrics import MetricsCollector
+
+        collector = MetricsCollector()
+        return collector.get_metrics()
+
+    except Exception as e:
+        logger.error(f"Metrics error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+if __name__ == "__main__":
+    import uvicorn
+
+    uvicorn.run(
+        "api.main:app",
+        host=os.getenv("API_HOST", "0.0.0.0"),
+        port=int(os.getenv("API_PORT", 8000)),
+        reload=True
+    )

@@ -1,0 +1,67 @@
+{
+  "dashboard": {
+    "title": "Security RAG Monitoring",
+    "panels": [
+      {
+        "title": "Query Volume Over Time",
+        "type": "graph",
+        "targets": [
+          {
+            "expr": "sum(rag_queries_total) by (time)",
+            "legendFormat": "Queries per minute"
+          }
+        ]
+      },
+      {
+        "title": "Retrieval Latency by Approach",
+        "type": "graph",
+        "targets": [
+          {
+            "expr": "avg(rag_query_latency_seconds) by (retrieval_approach)",
+            "legendFormat": "{{ retrieval_approach }}"
+          }
+        ]
+      },
+      {
+        "title": "User Feedback Rate",
+        "type": "gauge",
+        "targets": [
+          {
+            "expr": "sum(rag_user_feedback{feedback_type='positive'}) / sum(rag_user_feedback)",
+            "legendFormat": "Positive feedback %"
+          }
+        ]
+      },
+      {
+        "title": "Top 10 Threat IDs",
+        "type": "table",
+        "targets": [
+          {
+            "expr": "topk(10, sum by (threat_id) (rag_queries_total))",
+            "format": "table"
+          }
+        ]
+      },
+      {
+        "title": "Retrieval Score Distribution",
+        "type": "heatmap",
+        "targets": [
+          {
+            "expr": "rag_retrieval_score",
+            "format": "heatmap"
+          }
+        ]
+      },
+      {
+        "title": "LLM Eval Scores by Variant",
+        "type": "graph",
+        "targets": [
+          {
+            "expr": "avg(rag_llm_score) by (prompt_variant)",
+            "legendFormat": "{{ prompt_variant }}"
+          }
+        ]
+      }
+    ]
+  }
+}

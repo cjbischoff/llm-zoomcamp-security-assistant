@@ -1,0 +1,88 @@
+version: '3.8'
+
+services:
+  postgres:
+    image: postgres:15-alpine
+    container_name: security_rag_postgres
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: password
+      POSTGRES_DB: security_rag
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - security_rag_net
+
+  qdrant:
+    image: qdrant/qdrant:latest
+    container_name: security_rag_qdrant
+    ports:
+      - "6333:6333"
+    volumes:
+      - qdrant_storage:/qdrant/storage
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:6333/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - security_rag_net
+
+  grafana:
+    image: grafana/grafana:latest
+    container_name: security_rag_grafana
+    ports:
+      - "3000:3000"
+    environment:
+      GF_SECURITY_ADMIN_USER: admin
+      GF_SECURITY_ADMIN_PASSWORD: admin
+    volumes:
+      - ./monitoring/grafana/provisioning:/etc/grafana/provisioning
+      - grafana_storage:/var/lib/grafana
+    depends_on:
+      postgres:
+        condition: service_healthy
+    networks:
+      - security_rag_net
+
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: security_rag_app
+    ports:
+      - "8000:8000"
+    environment:
+      OPENAI_API_KEY: ${OPENAI_API_KEY}
+      DLT_POSTGRES_USER: postgres
+      DLT_POSTGRES_PASSWORD: password
+      DLT_POSTGRES_HOST: postgres
+      DLT_POSTGRES_PORT: 5432
+      DLT_POSTGRES_DATABASE: security_rag
+      QDRANT_HOST: qdrant
+      QDRANT_PORT: 6333
+    depends_on:
+      postgres:
+        condition: service_healthy
+      qdrant:
+        condition: service_healthy
+    volumes:
+      - ./data:/app/data
+    networks:
+      - security_rag_net
+
+volumes:
+  postgres_data:
+  qdrant_storage:
+  grafana_storage:
+
+networks:
+  security_rag_net:
+    driver: bridge
