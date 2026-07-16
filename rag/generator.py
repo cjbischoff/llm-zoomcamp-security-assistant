@@ -1,8 +1,11 @@
 """LLM response generation with prompt variants"""
 
+import logging
 import os
 from typing import AsyncGenerator, List, Dict, Any
 from openai import AsyncOpenAI
+
+logger = logging.getLogger(__name__)
 
 
 class LLMGenerator:
@@ -77,17 +80,20 @@ class LLMGenerator:
                     {"role": "system", "content": system_prompt},
                     {"role": "user", "content": user_prompt}
                 ],
-                temperature=0.5,
-                max_tokens=500,
+                temperature=0.2,
+                max_tokens=1500,
                 stream=True
             )
 
             async for chunk in stream:
-                if chunk.choices[0].delta.content:
+                if chunk.choices and chunk.choices[0].delta.content:
                     yield chunk.choices[0].delta.content
 
-        except Exception as e:
-            yield f"Error generating answer: {str(e)}"
+        except Exception:
+            # Log detail server-side; never stream raw exception text — it can
+            # carry the API key or connection host (Security V7 / T-02-07).
+            logger.exception("Answer generation failed")
+            yield "Sorry — answer generation is currently unavailable. Please try again."
 
     def generate_qa_pair(self, chunk_text: str, chunk_id: str) -> Dict[str, str]:
         """Generate a Q&A pair for evaluation (synchronous)"""
