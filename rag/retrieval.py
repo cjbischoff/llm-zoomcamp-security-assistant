@@ -1,8 +1,12 @@
 """Retrieval pipeline: Dense, BM25, and Hybrid search"""
 
+import logging
 import os
 from typing import List, Dict, Any
 from qdrant_client import QdrantClient
+from qdrant_client.http.exceptions import ResponseHandlingException, UnexpectedResponse
+
+logger = logging.getLogger(__name__)
 
 
 class DenseRetriever:
@@ -25,18 +29,38 @@ class DenseRetriever:
             top_k: Maximum number of hits to return.
 
         Returns:
-            ``{"status": "ok", "hits": [...]}`` where each hit is
-            ``{"text", "score", "metadata"}``. ``score`` is the raw cosine
-            similarity (higher = better, no inversion) and ``text`` is excluded
-            from ``metadata``.
+            ``{"status": str, "hits": [...]}`` where ``status`` is one of
+            ``"ok"``, ``"collection_missing"``, ``"backend_down"``, or
+            ``"backend_error"``. On ``"ok"`` each hit is
+            ``{"text", "score", "metadata"}`` with ``score`` the raw cosine
+            similarity (higher = better, no inversion) and ``text`` excluded
+            from ``metadata``. A genuine empty result is ``ok`` with
+            ``hits == []`` — an outage is never masked as an empty result.
+            Status strings are the only client-facing signal; raw exception
+            detail is logged, never returned (no connection strings/keys leaked).
         """
-        resp = self.client.query_points(
-            collection_name=self.collection_name,
-            query=query_embedding,
-            limit=top_k,
-            with_payload=True,
-            with_vectors=False,
-        )
+        try:
+            if not self.client.collection_exists(self.collection_name):
+                return {"status": "collection_missing", "hits": []}
+        except ResponseHandlingException as e:
+            logger.error("Qdrant backend unreachable during preflight: %s", e)
+            return {"status": "backend_down", "hits": []}
+
+        try:
+            resp = self.client.query_points(
+                collection_name=self.collection_name,
+                query=query_embedding,
+                limit=top_k,
+                with_payload=True,
+                with_vectors=False,
+            )
+        except ResponseHandlingException as e:
+            logger.error("Qdrant backend unreachable during query: %s", e)
+            return {"status": "backend_down", "hits": []}
+        except UnexpectedResponse as e:
+            logger.error("Qdrant query failed: %s", e)
+            return {"status": "backend_error", "hits": []}
+
         hits = [
             {
                 "text": p.payload.get("text", ""),
@@ -68,8 +92,8 @@ class HybridRetriever:
 
     def retrieve(self, query_embedding: List[float], query_text: str, top_k: int = 5) -> List[Dict[str, Any]]:
         """Hybrid search with RRF fusion"""
-        # Get dense results
-        dense_results = self.dense.retrieve(query_embedding, top_k=10)
+        # Get dense results (retrieve() now returns a {status, hits} channel)
+        dense_results = self.dense.retrieve(query_embedding, top_k=10)["hits"]
 
         # Get BM25 results
         bm25_results = self.bm25.retrieve(query_text, top_k=10)
