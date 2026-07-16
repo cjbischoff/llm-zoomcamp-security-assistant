@@ -14,6 +14,14 @@ import argparse
 import logging
 from dotenv import load_dotenv
 
+# Ensure the repo root is importable when run as a script
+# (`python ingestion/run_pipeline.py`): otherwise sys.path[0] is the ingestion/
+# directory and the absolute `ingestion.*` package imports below raise
+# ModuleNotFoundError. The phase goal mandates this exact invocation.
+_REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if _REPO_ROOT not in sys.path:
+    sys.path.insert(0, _REPO_ROOT)
+
 # Load environment
 load_dotenv()
 
@@ -158,9 +166,20 @@ def run_pipeline(sources: str = "all", clear_qdrant: bool = False):
     # continue-and-report — a single failing source is dropped; the run only
     # aborts if EVERY selected source fails (D-01/D-02).
     logger.info("\n[Stage 1] Staging %d source(s) via dlt -> Postgres...", len(selected))
+    # dlt's postgres destination needs explicit credentials — it does NOT read our
+    # POSTGRES_URL / DLT_POSTGRES_* env names (only secrets.toml or
+    # DESTINATION__POSTGRES__*). Derive the DSN from the same env the rest of the
+    # app uses so `python ingestion/run_pipeline.py` is self-contained.
+    pg_dsn = os.getenv("POSTGRES_URL") or (
+        f"postgresql://{os.getenv('DLT_POSTGRES_USER', 'postgres')}:"
+        f"{os.getenv('DLT_POSTGRES_PASSWORD', 'password')}@"
+        f"{os.getenv('DLT_POSTGRES_HOST', 'localhost')}:"
+        f"{os.getenv('DLT_POSTGRES_PORT', '5432')}/"
+        f"{os.getenv('DLT_POSTGRES_DATABASE', 'security_rag')}"
+    )
     pipeline = dlt.pipeline(
         pipeline_name="security_rag",
-        destination="postgres",
+        destination=dlt.destinations.postgres(credentials=pg_dsn),
         dataset_name="staging",
     )
     succeeded, failed = [], []
