@@ -9,3 +9,6 @@ venv/
 *.egg-info/
 dist/
 build/
+
+# GSD planning docs (local-only)
+.planning/
