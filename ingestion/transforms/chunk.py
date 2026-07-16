@@ -1,7 +1,7 @@
 """Chunking logic for security documents."""
 
 import re
-from typing import List, Dict, Any
+from typing import Any, Dict, List, Optional
 
 import tiktoken
 
@@ -34,13 +34,19 @@ class Chunker:
     """Source-specific chunking logic."""
 
     @staticmethod
-    def chunk_owasp_threat(text: str, threat_id: str, threat_name: str) -> List[Dict[str, Any]]:
+    def chunk_owasp_threat(
+        text: str, threat_id: str, threat_name: str, source: str = "owasp"
+    ) -> List[Dict[str, Any]]:
         """Emit one chunk per OWASP threat entry, token-capped.
 
         Args:
             text: The threat entry body.
-            threat_id: Canonical threat id (e.g. ``LLM01``).
+            threat_id: Canonical threat id (e.g. ``LLM01`` or ``ASI01``).
             threat_name: Human-readable threat name.
+            source: Corpus identifier preserved on every chunk. Distinguishes the
+                OWASP LLM Top 10 (``owasp_llm_top_10``) from the OWASP Agentic
+                Top 10 (``owasp_agentic_top_10``) so the five sources stay
+                distinct in the payload (D-04). Defaults to ``owasp``.
 
         Returns:
             List of ``{"text", "metadata"}`` chunks. Normally one entry (D-03);
@@ -50,7 +56,7 @@ class Chunker:
             {
                 "text": piece,
                 "metadata": {
-                    "source": "owasp",
+                    "source": source,
                     "threat_id": threat_id,
                     "threat_name": threat_name,
                     "chunk_type": "threat_entry",
@@ -60,7 +66,7 @@ class Chunker:
         ]
 
     @staticmethod
-    def chunk_by_sections(text: str, source: str, section_title: str = None) -> List[Dict[str, Any]]:
+    def chunk_by_sections(text: str, source: str, section_title: Optional[str] = None) -> List[Dict[str, Any]]:
         """Chunk text on markdown headings, token-capping each section.
 
         Args:
@@ -92,7 +98,7 @@ class Chunker:
         return chunks
 
     @staticmethod
-    def chunk_generic(text: str, source: str, filename: str = None) -> List[Dict[str, Any]]:
+    def chunk_generic(text: str, source: str, filename: Optional[str] = None) -> List[Dict[str, Any]]:
         """Chunk an arbitrary document, token-capping oversized text.
 
         Args:

@@ -286,11 +286,15 @@ def _chunk_rows(source_key: str, rows: list, chunker) -> list:
             continue
         if source_key == "owasp_llm":
             chunks += chunker.chunk_owasp_threat(
-                content, row.get("threat_id", ""), row.get("threat_name", "")
+                content, row.get("threat_id", ""), row.get("threat_name", ""),
+                source="owasp_llm_top_10",
             )
         elif source_key == "owasp_agentic":
             threat_id = row.get("threat_id", "")
-            chunks += chunker.chunk_owasp_threat(content, threat_id, threat_id)
+            chunks += chunker.chunk_owasp_threat(
+                content, threat_id, row.get("threat_name", threat_id),
+                source="owasp_agentic_top_10",
+            )
         elif source_key == "mcp_spec":
             chunks += chunker.chunk_by_sections(content, "mcp_protocol_spec", row.get("section"))
         elif source_key == "mcp_security":
