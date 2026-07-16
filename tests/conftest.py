@@ -6,10 +6,64 @@ INSIDE the fixture, never at module top, so collection never fails when the
 dependency or the service is absent.
 """
 
+import asyncio
 import os
 import uuid
 
 import pytest
+
+
+@pytest.fixture
+def fake_vector():
+    """Return a fixed 1536-dim query-embedding stand-in for unit retrieval tests.
+
+    Mirrors the Phase 1 collection contract (text-embedding-3-small → 1536).
+    Never 512 — that was the Phase 1 landmine. The value is arbitrary; unit
+    tests mock the vector search, so only the length/shape matters.
+
+    Returns:
+        list[float]: A ``[0.1] * 1536`` list.
+    """
+    return [0.1] * 1536
+
+
+@pytest.fixture
+def openai_available():
+    """Skip the test unless ``OPENAI_API_KEY`` is present in the environment.
+
+    Mirrors the ``qdrant_client`` skip style so live generation/embedding tests
+    degrade to a skip (never an error) offline. The key's value is only checked
+    for presence — it is never printed, logged, or asserted on.
+
+    Returns:
+        bool: ``True`` when a key is present (otherwise the test is skipped).
+    """
+    if not os.getenv("OPENAI_API_KEY"):
+        pytest.skip("OPENAI_API_KEY not set — live OpenAI test skipped")
+    return True
+
+
+@pytest.fixture
+def collect_stream():
+    """Return a helper that fully drains an async generator into a list.
+
+    Avoids adding an async pytest plugin — only ``pytest`` + ``pytest-mock``
+    are installed. The returned callable runs the drain on a fresh event loop
+    via stdlib :func:`asyncio.run`, so async-generator serving code can be
+    exercised from ordinary synchronous test bodies.
+
+    Returns:
+        Callable[[AsyncGenerator], list]: Drains the given async generator and
+            returns the yielded chunks in order.
+    """
+
+    def _drain(async_gen):
+        async def _run():
+            return [chunk async for chunk in async_gen]
+
+        return asyncio.run(_run())
+
+    return _drain
 
 
 @pytest.fixture
