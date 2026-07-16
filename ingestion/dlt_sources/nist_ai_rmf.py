@@ -1,65 +1,84 @@
-"""dlt source for NIST AI Risk Management Framework PDF"""
+"""dlt source for the NIST Generative AI Profile (NIST.AI.600-1) PDF."""
+
+import logging
+import re
+import tempfile
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Generator
 
 import dlt
 import requests
-import tempfile
-from pathlib import Path
-from PyPDF2 import PdfReader
-from typing import Generator
+from pypdf import PdfReader
+
+logger = logging.getLogger(__name__)
+
+PDF_URL = "https://nvlpubs.nist.gov/nistpubs/ai/NIST.AI.600-1.pdf"
+# Numbered section headings, e.g. "2.1 CBRN Information" — used to split the
+# extracted text into sections. Downstream the Chunker token-caps each section.
+_HEADING = re.compile(r"(?m)^\s*(\d+(?:\.\d+)*)\s+[A-Z].{0,80}$")
 
 
-@dlt.resource(name="nist_ai_rmf", write_disposition="replace")
+@dlt.resource(name="nist_ai_rmf", write_disposition="merge", primary_key="doc_id")
 def fetch_nist_ai_rmf() -> Generator[dict, None, None]:
-    """
-    Download NIST AI Risk Management Framework PDF and extract text.
+    """Download the NIST GenAI Profile PDF and yield one row per section.
 
-    Chunks by section heading (~500 tokens per chunk).
-    """
-    pdf_url = "https://nvlpubs.nist.gov/nistpubs/ai/NIST.AI.600-1.pdf"
+    Fetches ``NIST.AI.600-1.pdf``, extracts text with pypdf, and splits it on
+    numbered section headings. Sections are emitted whole (no character
+    truncation); the Stage 2 Chunker applies the token cap.
 
+    Yields:
+        dict: A row with ``doc_id``, ``section_index``, ``content``,
+        ``source``, ``url``, ``total_pages``, and ``fetched_at``.
+
+    Notes:
+        On download/parse failure this logs a warning and yields nothing
+        (continue-and-report). The temp PDF file is always removed.
+    """
     try:
-        response = requests.get(pdf_url, timeout=30)
+        response = requests.get(PDF_URL, timeout=30)
         response.raise_for_status()
     except requests.RequestException as e:
-        print(f"Warning: Could not download NIST AI RMF: {e}")
+        logger.warning("Source nist_ai_rmf download failed, skipping: %s", e)
         return
 
-    # Save PDF temporarily and extract text
     with tempfile.NamedTemporaryFile(suffix=".pdf", delete=False) as tmp:
         tmp.write(response.content)
         pdf_path = tmp.name
 
     try:
         reader = PdfReader(pdf_path)
-        full_text = ""
+        total_pages = len(reader.pages)
+        full_text = "\n".join(page.extract_text() or "" for page in reader.pages)
 
-        for page_num, page in enumerate(reader.pages):
-            text = page.extract_text()
-            full_text += f"\n--- Page {page_num + 1} ---\n{text}"
-
-        # Split by major sections (GOVERN, MAP, MEASURE, MANAGE)
-        sections = full_text.split("SECTION")
+        # Split on numbered headings; fall back to the whole doc if none match.
+        boundaries = [m.start() for m in _HEADING.finditer(full_text)]
+        if boundaries:
+            spans = boundaries + [len(full_text)]
+            sections = [full_text[spans[i] : spans[i + 1]] for i in range(len(boundaries))]
+        else:
+            sections = [full_text]
 
         for i, section_text in enumerate(sections):
-            if len(section_text.split()) < 50:  # Skip short fragments
+            if len(section_text.split()) < 50:  # skip heading-only fragments
                 continue
-
-            # Truncate to reasonable size
-            section_text = section_text[:5000]
-
             yield {
+                "doc_id": f"nist_ai_rmf::{i}",
                 "section_index": i,
-                "content": section_text,
+                "content": section_text.strip(),
                 "source": "nist_ai_rmf",
-                "url": pdf_url,
-                "total_pages": len(reader.pages),
-                "fetched_at": dlt.current.run_started_at,
+                "url": PDF_URL,
+                "total_pages": total_pages,
+                "fetched_at": datetime.now(timezone.utc),
             }
+    except Exception as e:  # noqa: BLE001 - continue-and-report
+        logger.warning("Source nist_ai_rmf parse failed, skipping: %s", e)
+        return
     finally:
-        Path(pdf_path).unlink()
+        Path(pdf_path).unlink(missing_ok=True)
 
 
 @dlt.source
 def nist_ai_rmf_source():
-    """dlt source definition for NIST AI RMF"""
+    """dlt source definition for the NIST GenAI Profile."""
     return [fetch_nist_ai_rmf()]
