@@ -6,32 +6,53 @@ from typing import Tuple
 class QueryRewriter:
     """Normalize free-text security queries to canonical threat IDs"""
 
-    # Threat ID mappings
+    # Free-text phrase -> canonical threat id. Verified live against the ingested
+    # security_rag collection (OWASP LLM 2.0 = LLM01-LLM10, OWASP Agentic = ASI01-ASI10).
+    # Scope is LLM/ASI ids only: MCP/NIST chunks carry threat_id=None and cannot be boosted.
     THREAT_MAPPINGS = {
-        # LLM Top 10
+        # --- OWASP LLM 2.0 ---
         "prompt injection": "LLM01",
-        "prompt attacks": "LLM01",
-        "prompt hijacking": "LLM01",
-        "model denial of service": "LLM02",
-        "dos": "LLM02",
-        "training data poisoning": "LLM03",
-        "model poisoning": "LLM03",
-        "backdoor": "LLM03",
-        "model inversion": "LLM04",
-        "supply chain": "LLM05",
-        "sensitive info": "LLM06",
-        "insecure output": "LLM07",
-        "vector db poisoning": "LLM08",
-        "plugin security": "LLM09",
-        "model theft": "LLM10",
-        # Agentic Top 10
-        "confused deputy": "AGENTIC-01",
-        "tool calling": "AGENTIC-02",
-        "agent security": "AGENTIC-03",
-        # MCP
-        "token expiration": "MCP-security",
-        "credential aggregation": "MCP-security",
-        "mcp protocol": "MCP",
+        "jailbreak": "LLM01",
+        "sensitive information disclosure": "LLM02",
+        "sensitive information": "LLM02",
+        "data leakage": "LLM02",
+        "pii disclosure": "LLM02",
+        "supply chain": "LLM03",
+        "data and model poisoning": "LLM04",
+        "data poisoning": "LLM04",
+        "model poisoning": "LLM04",
+        "training data poisoning": "LLM04",
+        "improper output handling": "LLM05",
+        "insecure output handling": "LLM05",
+        "excessive agency": "LLM06",
+        "system prompt leakage": "LLM07",
+        "system prompt leak": "LLM07",
+        "vector and embedding weaknesses": "LLM08",
+        "embedding weaknesses": "LLM08",
+        "misinformation": "LLM09",
+        "hallucination": "LLM09",
+        "unbounded consumption": "LLM10",
+        "denial of service": "LLM10",
+        "model dos": "LLM10",
+        # --- OWASP Agentic (ASI) ---
+        "agent goal hijack": "ASI01",
+        "goal hijack": "ASI01",
+        "tool misuse": "ASI02",
+        "tool exploitation": "ASI02",
+        "identity and privilege abuse": "ASI03",
+        "privilege abuse": "ASI03",
+        "agentic supply chain": "ASI04",
+        "unexpected code execution": "ASI05",
+        "memory and context poisoning": "ASI06",
+        "context poisoning": "ASI06",
+        "memory poisoning": "ASI06",
+        "insecure inter-agent communication": "ASI07",
+        "inter-agent communication": "ASI07",
+        "cascading agent failures": "ASI08",
+        "cascading failures": "ASI08",
+        "human-agent trust exploitation": "ASI09",
+        "rogue agents": "ASI10",
+        "rogue agent": "ASI10",
     }
 
     def rewrite(self, query: str) -> Tuple[str, str]:
