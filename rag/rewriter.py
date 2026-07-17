@@ -1,6 +1,7 @@
 """Query rewriting for threat ID normalization (BONUS FEATURE)"""
 
-from typing import Tuple
+import re
+from typing import Optional, Tuple
 
 
 class QueryRewriter:
@@ -55,22 +56,43 @@ class QueryRewriter:
         "rogue agent": "ASI10",
     }
 
-    def rewrite(self, query: str) -> Tuple[str, str]:
+    def __init__(self) -> None:
+        # Longest-phrase-first precedence (D-03): "supply chain" is tested before any
+        # shorter overlapping key, so ambiguous inputs resolve deterministically.
+        # Each pattern is a re.escape'd literal wrapped in \b -> word-boundary anchored,
+        # linear-time (no backtracking / ReDoS).
+        ordered = sorted(
+            self.THREAT_MAPPINGS.items(), key=lambda kv: len(kv[0]), reverse=True
+        )
+        self._compiled = [
+            (re.compile(rf"\b{re.escape(pattern)}\b"), threat_id)
+            for pattern, threat_id in ordered
+        ]
+
+    def rewrite(self, query: str) -> Tuple[str, Optional[str]]:
+        """Detect the canonical threat id a free-text query refers to.
+
+        Matches word-boundary-anchored phrases in longest-first order so overlapping
+        terms resolve to the correct, distinct id (D-03). The detected id feeds the
+        retrieval soft-boost (D-04) downstream.
+
+        Args:
+            query: The raw user query.
+
+        Returns:
+            ``(original_query, detected_threat_id_or_None)`` — the second element is a
+            canonical id string (``LLM01``-``LLM10`` / ``ASI01``-``ASI10``) or ``None``
+            when no phrase matches. Never a bracket-prefixed rewritten string.
+
+        Example:
+            >>> QueryRewriter().rewrite("how do I stop prompt injection")
+            ('how do I stop prompt injection', 'LLM01')
         """
-        Rewrite query if it matches a threat pattern.
-
-        Returns: (original_query, rewritten_query_with_threat_id)
-        """
-        query_lower = query.lower()
-
-        # Check for threat matches
-        for pattern, threat_id in self.THREAT_MAPPINGS.items():
-            if pattern in query_lower:
-                rewritten = f"[{threat_id}] {query}"
-                return query, rewritten
-
-        # No match, return original
-        return query, query
+        low = query.lower()
+        for rx, threat_id in self._compiled:
+            if rx.search(low):
+                return query, threat_id
+        return query, None
 
     def normalize_threat_id(self, threat_id: str) -> str:
         """Normalize threat ID format (uppercase)"""
