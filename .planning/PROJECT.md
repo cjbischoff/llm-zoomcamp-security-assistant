@@ -18,13 +18,12 @@ Ask a security question, get an accurate answer grounded in real retrieved sourc
 - ✓ Threat-ID mapping dictionary (OWASP/MCP/NIST canonical IDs) — existing
 - ✓ dlt source definitions for 5 corpora + docker-compose (Qdrant/Postgres/Grafana) — existing (unwired)
 - ✓ **Real ingestion (Phase 1):** dlt → Postgres staging → chunk → 1536-dim OpenAI embed → idempotent Qdrant upsert. `python ingestion/run_pipeline.py` populates **850 points** across all **5 distinct sources** (owasp_llm_top_10, owasp_agentic_top_10, mcp_protocol_spec, mcp_security_docs, nist_ai_rmf) at size=1536/cosine; re-run leaves the count unchanged (content-hash uuid5 IDs). REP-01 pins corrected; 20 pytest tests green.
+- ✓ **Real retrieval + grounded generation (Phase 2):** dense `query_points` search over the 850-point collection → 0.4 cosine refuse-gate (off-topic/below-floor → "not in the indexed sources", LLM not called) → streamed `gpt-4o-mini` answers with inline `[threat-ID]` citations + Sources block. Two prompt variants (Practitioner default, Base via `prompt_variant`); RET-02 distinguishes backend-down / collection-missing / empty (no silent `[]`). Verified live: real `[LLM01]` grounded answer, off-topic refusal, 395-chunk incremental HTTP stream; 31 pytest tests green.
 
 ### Active
 
 <!-- Hypotheses until shipped and validated. All currently stubbed. -->
 
-- [ ] Real retrieval: dense vector search against populated Qdrant collection
-- [ ] Real generation: OpenAI streaming answers grounded in retrieved context, base + practitioner prompt variants
 - [ ] Bonus — hybrid search: dense + BM25 + RRF fusion
 - [ ] Bonus — cross-encoder reranking on fused results
 - [ ] Bonus — query rewriting: free text → canonical threat IDs (word-boundary, precedence-safe)
@@ -44,7 +43,7 @@ Ask a security question, get an accurate answer grounded in real retrieved sourc
 ## Context
 
 - **Grading target:** LLM Zoomcamp 2026 capstone rubric, aiming 22-25 points. Rubric: knowledge base, retrieval pipeline (multiple approaches), evaluation (retrieval + LLM), interface, monitoring+feedback, automated ingestion (dlt = +2), Docker (+1), bonuses (hybrid/rerank/rewriting), documentation.
-- **Current state:** Phase 1 complete — ingestion is real: an 850-point, 1536/cosine, idempotent Qdrant collection populated from all 5 sources, with 20 pytest tests green. The remaining modules (retrieval, generation, API/UI, monitoring, evaluation) are still scaffold/placeholder — Phases 2-6. See `.planning/codebase/CONCERNS.md`.
+- **Current state:** Phases 1-2 complete — ingestion (850-pt 1536/cosine collection) AND the online serving path are real: dense retrieval, 0.4-gated grounded generation with `[threat-ID]` citations, dual prompt variants, and token streaming, all verified live end-to-end (31 pytest tests green). Remaining: bonuses hybrid/rerank/rewrite (Phase 3), evaluation (Phase 4), interface/monitoring wiring (Phase 5), containerization/docs (Phase 6). See `.planning/codebase/CONCERNS.md`.
 - **Dep pins:** Fixed in Phase 1 (REP-01) — `qdrant-client` 1.x, `pypdf` (replaced non-existent `PyPDF2==4.0.1`), `tiktoken` added; `uv pip compile` resolves 121 packages on Python 3.11.
 - **Rubric/plan references:** `/Users/christopher/Workspace/topic_zoomcamp-llm/synthesis/` (capstone plan + implementation guide); course rubric at github.com/DataTalksClub/llm-zoomcamp/blob/main/project.md.
 
@@ -85,4 +84,4 @@ This document evolves at phase transitions and milestone boundaries.
 4. Update Context with current state
 
 ---
-*Last updated: 2026-07-16 after Phase 1 (Ingestion & Populated Knowledge Base) completion*
+*Last updated: 2026-07-17 after Phase 2 (Dense Retrieval & Grounded Generation) completion*
