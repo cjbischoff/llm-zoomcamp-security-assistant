@@ -55,6 +55,7 @@ def _mock_qdrant(mocker, *, exists=True, exists_exc=None, query_exc=None, points
 def test_maps_query_points(mocker):
     """A scored point maps to {text, score, metadata} with score verbatim (RET-01)."""
     point = mocker.MagicMock(
+        id="7f3a2b10-0000-4000-8000-000000000001",
         score=0.57,
         payload={
             "text": "Prompt injection manipulates the model via crafted input.",
@@ -71,7 +72,9 @@ def test_maps_query_points(mocker):
     assert result["status"] == "ok"
     assert len(result["hits"]) == 1
     hit = result["hits"][0]
-    assert set(hit.keys()) == {"text", "score", "metadata"}
+    # 'id' is the RRF join key added in Plan 03-03 (Phase-3 contract change).
+    assert set(hit.keys()) == {"id", "text", "score", "metadata"}
+    assert hit["id"] == "7f3a2b10-0000-4000-8000-000000000001"
     assert hit["score"] == 0.57  # cosine similarity copied verbatim, no inversion
     assert hit["text"] == "Prompt injection manipulates the model via crafted input."
     assert "text" not in hit["metadata"]  # text lives at the top level, not in metadata

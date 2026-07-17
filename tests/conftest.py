@@ -44,6 +44,51 @@ def openai_available():
 
 
 @pytest.fixture
+def fused_hits():
+    """Return a small RRF-shaped hit list for reranker/hybrid unit tests.
+
+    Mirrors the post-fusion hit contract: each hit is
+    ``{"id", "text", "score", "metadata"}`` where ``score`` is the original
+    dense cosine similarity (preserved through fusion for the 0.4 gate) and at
+    least one hit carries ``metadata["threat_id"]`` so soft-boost tests have a
+    target. Ordered as a plausible pre-rerank fused list.
+
+    Returns:
+        list[dict]: Five hit dicts with distinct string ``id`` values.
+    """
+    return [
+        {"id": "id-a", "text": "prompt injection manipulates the model via crafted input",
+         "score": 0.61, "metadata": {"threat_id": "LLM01", "source": "owasp_llm_top_10"}},
+        {"id": "id-b", "text": "supply chain risk from third-party model dependencies",
+         "score": 0.55, "metadata": {"threat_id": "LLM03", "source": "owasp_llm_top_10"}},
+        {"id": "id-c", "text": "excessive agency grants an agent too much autonomy",
+         "score": 0.48, "metadata": {"threat_id": "LLM06", "source": "owasp_llm_top_10"}},
+        {"id": "id-d", "text": "the model context protocol defines a client-server transport",
+         "score": 0.44, "metadata": {"source": "mcp_protocol_spec"}},
+        {"id": "id-e", "text": "nist ai risk management framework govern map measure manage",
+         "score": 0.41, "metadata": {"source": "nist_ai_rmf"}},
+    ]
+
+
+@pytest.fixture
+def cross_encoder_available():
+    """Skip the test unless ``sentence_transformers`` can be imported.
+
+    Mirrors the ``openai_available`` skip style so live rerank tests degrade to
+    a skip (never an error) when the heavy dependency is absent. Presence check
+    only — the model itself is not loaded and the network is not touched here.
+
+    Returns:
+        bool: ``True`` when the package imports (otherwise the test is skipped).
+    """
+    try:
+        import sentence_transformers  # noqa: F401
+    except ImportError:
+        pytest.skip("sentence-transformers not installed — live rerank test skipped")
+    return True
+
+
+@pytest.fixture
 def collect_stream():
     """Return a helper that fully drains an async generator into a list.
 
