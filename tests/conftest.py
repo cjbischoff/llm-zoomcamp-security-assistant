@@ -13,6 +13,17 @@ import uuid
 import pytest
 
 
+def pytest_configure(config):
+    """Register custom markers used by the live probes.
+
+    Args:
+        config: The pytest config object.
+    """
+    config.addinivalue_line(
+        "markers", "slow: live probe that may download a model (~80MB) on first run"
+    )
+
+
 @pytest.fixture
 def fake_vector():
     """Return a fixed 1536-dim query-embedding stand-in for unit retrieval tests.
