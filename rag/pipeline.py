@@ -45,7 +45,9 @@ class RAGPipeline:
         user_id: Optional[str] = None,
         prompt_variant: str = "practitioner",
         top_k: int = 5,
-        retrieval_mode: str = "dense",
+        # D-08: hybrid_rerank is the eval winner (hit_rate 84.62%, MRR 0.773) —
+        # kept in sync with api.main QueryRequest.retrieval_mode (Pitfall 5).
+        retrieval_mode: str = "hybrid_rerank",
     ) -> AsyncGenerator[str, None]:
         """
         Main pipeline: rewrite → embed → retrieve → gate → generate → log
@@ -58,9 +60,10 @@ class RAGPipeline:
             user_id: Optional caller id for logging.
             prompt_variant: ``"practitioner"`` (default) or ``"base"``.
             top_k: Number of passages to retrieve.
-            retrieval_mode: One of ``"dense"`` (default, fast interactive path —
-                D-06), ``"hybrid"`` (dense+BM25+RRF), or ``"hybrid_rerank"``
-                (adds the cross-encoder). Unknown values normalize to ``"dense"``
+            retrieval_mode: One of ``"dense"`` (fast interactive path — D-06),
+                ``"hybrid"`` (dense+BM25+RRF), or ``"hybrid_rerank"`` (default,
+                adds the cross-encoder; eval winner — D-08). Unknown values
+                normalize to ``"dense"``
                 (Security V5 — explicit membership, never dynamic dispatch). In
                 the hybrid modes the blocking BM25/RRF/torch work runs off the
                 event loop via :func:`asyncio.to_thread` (BON-01).

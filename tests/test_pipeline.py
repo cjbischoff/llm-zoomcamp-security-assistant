@@ -69,7 +69,7 @@ def test_refuse_below_threshold(mocker, collect_stream):
     hits = [{"text": "weakly related", "score": 0.25, "metadata": {}}]
     pipeline, generator = _build_pipeline(mocker, status="ok", hits=hits)
 
-    out = "".join(collect_stream(pipeline.stream_answer(query="cookies?")))
+    out = "".join(collect_stream(pipeline.stream_answer(query="cookies?", retrieval_mode="dense")))
 
     assert "indexed sources" in out.lower()  # fixed refusal message
     generator.stream_answer.assert_not_called()  # deterministic gate, no LLM call
@@ -86,7 +86,9 @@ def test_answers_above_threshold(mocker, collect_stream):
     ]
     pipeline, generator = _build_pipeline(mocker, status="ok", hits=hits)
 
-    out = "".join(collect_stream(pipeline.stream_answer(query="what is prompt injection?")))
+    out = "".join(collect_stream(
+        pipeline.stream_answer(query="what is prompt injection?", retrieval_mode="dense")
+    ))
 
     assert out == "MODEL ANSWER"
     generator.stream_answer.assert_called_once()
@@ -97,12 +99,14 @@ def test_answers_above_threshold(mocker, collect_stream):
 def test_status_surfacing(mocker, collect_stream):
     """backend_down and collection_missing yield distinct messages, skip generation (D-03)."""
     pipeline_down, gen_down = _build_pipeline(mocker, status="backend_down", hits=[])
-    down = "".join(collect_stream(pipeline_down.stream_answer(query="q")))
+    down = "".join(collect_stream(pipeline_down.stream_answer(query="q", retrieval_mode="dense")))
 
     pipeline_missing, gen_missing = _build_pipeline(
         mocker, status="collection_missing", hits=[]
     )
-    missing = "".join(collect_stream(pipeline_missing.stream_answer(query="q")))
+    missing = "".join(collect_stream(
+        pipeline_missing.stream_answer(query="q", retrieval_mode="dense")
+    ))
 
     gen_down.stream_answer.assert_not_called()
     gen_missing.stream_answer.assert_not_called()

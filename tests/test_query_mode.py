@@ -77,15 +77,20 @@ def _build_pipeline(mocker):
     return pipeline, retriever, hybrid
 
 
-def test_default_routes_to_dense(mocker, collect_stream):
-    """No retrieval_mode -> dense retriever called, hybrid not (D-06)."""
+def test_default_routes_to_hybrid_rerank(mocker, collect_stream):
+    """No retrieval_mode -> hybrid_rerank leg called with rerank=True, dense not (D-08 eval winner)."""
+    async def _passthrough(func, *args, **kwargs):
+        return func(*args, **kwargs)
+
+    spy = mocker.patch("rag.pipeline.asyncio.to_thread", side_effect=_passthrough)
     pipeline, retriever, hybrid = _build_pipeline(mocker)
 
     out = "".join(collect_stream(pipeline.stream_answer(query="what is prompt injection?")))
 
     assert out == "MODEL ANSWER"
-    retriever.retrieve.assert_called_once()
-    hybrid.retrieve.assert_not_called()
+    assert spy.call_args.args[0] == hybrid.retrieve
+    assert spy.call_args.args[-1] is True  # rerank flag
+    retriever.retrieve.assert_not_called()
 
 
 def test_hybrid_routes_off_loop(mocker, collect_stream):
@@ -158,11 +163,11 @@ def test_query_rejects_invalid_retrieval_mode():
 
 
 def test_query_request_accepts_valid_modes():
-    """QueryRequest accepts each enum value and defaults to dense (network-free)."""
+    """QueryRequest accepts each enum value and defaults to hybrid_rerank (D-08, network-free)."""
     from pydantic import ValidationError
     from api.main import QueryRequest
 
-    assert QueryRequest(query="hi").retrieval_mode == "dense"
+    assert QueryRequest(query="hi").retrieval_mode == "hybrid_rerank"
     for mode in ("dense", "hybrid", "hybrid_rerank"):
         assert QueryRequest(query="hi", retrieval_mode=mode).retrieval_mode == mode
 

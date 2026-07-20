@@ -34,9 +34,10 @@ class QueryRequest(BaseModel):
     prompt_variant: Literal["practitioner", "base"] = "practitioner"
     # Enum-bound at the trust boundary (Security V5, T-03-04): an out-of-enum value
     # is a 422 at request validation — same discipline as the max_length cap —
-    # so the pipeline never dispatches on an untrusted raw string. dense is the
-    # default fast path (D-06).
-    retrieval_mode: Literal["dense", "hybrid", "hybrid_rerank"] = "dense"
+    # so the pipeline never dispatches on an untrusted raw string. hybrid_rerank
+    # is the eval winner and the default (D-08); kept in sync with
+    # RAGPipeline.stream_answer's default (Pitfall 5).
+    retrieval_mode: Literal["dense", "hybrid", "hybrid_rerank"] = "hybrid_rerank"
     user_id: Optional[str] = None
 
 
