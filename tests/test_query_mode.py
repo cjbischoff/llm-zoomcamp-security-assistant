@@ -132,3 +132,30 @@ def test_unknown_mode_normalizes_to_dense(mocker, collect_stream):
 
     retriever.retrieve.assert_called_once()
     hybrid.retrieve.assert_not_called()
+
+
+def test_query_rejects_invalid_retrieval_mode():
+    """/query returns 422 for an out-of-enum retrieval_mode, before any pipeline work."""
+    from fastapi.testclient import TestClient
+    from api.main import app
+
+    client = TestClient(app)
+    resp = client.post("/query", json={"query": "hi", "retrieval_mode": "bogus"})
+    assert resp.status_code == 422  # rejected at request validation, no pipeline built
+
+
+def test_query_request_accepts_valid_modes():
+    """QueryRequest accepts each enum value and defaults to dense (network-free)."""
+    from pydantic import ValidationError
+    from api.main import QueryRequest
+
+    assert QueryRequest(query="hi").retrieval_mode == "dense"
+    for mode in ("dense", "hybrid", "hybrid_rerank"):
+        assert QueryRequest(query="hi", retrieval_mode=mode).retrieval_mode == mode
+
+    try:
+        QueryRequest(query="hi", retrieval_mode="bogus")
+    except ValidationError:
+        pass
+    else:
+        raise AssertionError("expected ValidationError for out-of-enum retrieval_mode")
