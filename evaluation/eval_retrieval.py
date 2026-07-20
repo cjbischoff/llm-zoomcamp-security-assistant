@@ -1,9 +1,98 @@
-"""Evaluate retrieval quality: Hit Rate, MRR, Precision"""
+"""Evaluate retrieval quality: Hit Rate, MRR, Precision@5 across all three modes.
+
+Drives the real production retrievers (``rag/retrieval.py``) over a committed
+ground-truth CSV, joining each retrieved hit's Qdrant point ``id`` against the
+ground-truth ``chunk_id`` (D-06). Metrics are hand-rolled: hit-rate@k,
+reciprocal rank, and precision@k over a single gold chunk are three lines of
+arithmetic, and scikit-learn provides no ``hit_rate@k``/``MRR@k`` primitive, so
+adding it here buys nothing and drags in the deferred numpy-2.x reconciliation
+(D-05 reconciliation → hand-rolled math).
+"""
 
 import csv
 import json
+import logging
 import os
-from typing import List, Dict
+from typing import Any, Dict, List, Optional
+
+logger = logging.getLogger(__name__)
+
+# Lazy module-level singletons so importing this module never constructs an
+# OpenAI/Qdrant client (the pure-unit metric tests import RetrieverEvaluator).
+# The reranker's ~80MB download then happens at most once per process.
+_embedder = None
+_dense = None
+_hybrid = None
+
+
+def _get_retrievers():
+    """Lazily construct and cache the shared Embedder + retrievers.
+
+    Returns:
+        tuple: ``(embedder, dense_retriever, hybrid_retriever)``, each built once
+            per process. Constructing them here (not at import) keeps the pure
+            metric unit tests network-free.
+    """
+    global _embedder, _dense, _hybrid
+    if _embedder is None:
+        from ingestion.transforms.embed import Embedder
+        from rag.retrieval import DenseRetriever, HybridRetriever
+
+        _embedder = Embedder()
+        _dense = DenseRetriever()
+        _hybrid = HybridRetriever()
+    return _embedder, _dense, _hybrid
+
+
+def retrieve_hits(question: str, mode: str, top_k: int = 5) -> List[Dict[str, Any]]:
+    """Retrieve the full hit dicts for ``question`` in the given ``mode``.
+
+    Embeds the raw question once and drives the real retrievers so retrieval is
+    run a single time (the judge line reuses these hits to assemble context).
+    The comparison is kept uniform across modes (raw-question embed,
+    ``detected_id=None``) so mode differences reflect retrieval quality, not the
+    rewriter's soft-boost (research Open Question 2).
+
+    Args:
+        question: The raw ground-truth question.
+        mode: One of ``"dense"``, ``"hybrid"``, ``"hybrid_rerank"``.
+        top_k: Number of hits to return.
+
+    Returns:
+        list[dict]: The retriever's hit dicts (``{"id","text","score",...}``), or
+            ``[]`` when the retriever status is not ``"ok"`` (RET-02 — an outage
+            yields no hits and is logged, never silently scored as a miss).
+    """
+    embedder, dense, hybrid = _get_retrievers()
+    qvec = embedder.embed([question])[0]  # 1536-dim, matches the collection
+    if mode == "dense":
+        result = dense.retrieve(qvec, top_k=top_k)
+    else:  # hybrid | hybrid_rerank
+        result = hybrid.retrieve(
+            qvec, question, detected_id=None, top_k=top_k, rerank=(mode == "hybrid_rerank")
+        )
+    if result["status"] != "ok":
+        logger.warning("Retrieval status %r for mode %r — scoring as no hits", result["status"], mode)
+        return []
+    return result["hits"]
+
+
+def retrieved_ids(question: str, mode: str, top_k: int = 5) -> List[Any]:
+    """Return just the retrieved point ids for ``question`` in ``mode``.
+
+    Thin wrapper over :func:`retrieve_hits` (the relevance-join key is the point
+    ``id``). Returns ``[]`` on a non-ok retriever status (RET-02).
+
+    Args:
+        question: The raw ground-truth question.
+        mode: One of ``"dense"``, ``"hybrid"``, ``"hybrid_rerank"``.
+        top_k: Number of ids to return.
+
+    Returns:
+        list: The retrieved hits' point ids (joined against ground-truth
+            ``chunk_id``), or ``[]`` on an outage.
+    """
+    return [h["id"] for h in retrieve_hits(question, mode, top_k)]
 
 
 class RetrieverEvaluator:
@@ -39,33 +128,68 @@ class RetrieverEvaluator:
                 mrr = 1.0 / rank
                 break
 
-        # Precision@k
-        precision = sum(1 for rid in retrieved_ids if rid in expected_chunk_ids) / len(retrieved_ids) if retrieved_ids else 0
+        # Precision@k: relevant hits over the fixed top_k denominator (D-07). With
+        # a single gold chunk this is bounded at 1/top_k (0.2 for k=5) — expected,
+        # not a bug (research Pitfall 2); MRR is the sharper rank signal.
+        relevant = sum(1 for rid in retrieved_ids if rid in expected_chunk_ids)
+        precision = relevant / top_k if top_k else 0.0
 
         return {"hit": hit, "mrr": mrr, "precision": precision}
 
-    def evaluate_all(self, ground_truth_file: str, output_file: str = "evaluation/results/retrieval_eval.json"):
-        """Evaluate all queries"""
+    def evaluate_all(
+        self,
+        ground_truth_file: str,
+        modes: tuple = ("dense", "hybrid", "hybrid_rerank"),
+        output_file: str = "evaluation/results/retrieval_eval.json",
+    ) -> Optional[Dict[str, Dict[str, float]]]:
+        """Evaluate every ground-truth pair across all three retrieval modes.
+
+        For each mode, drives the real retrievers over every ground-truth
+        question (joining retrieved hit ``id`` against ``chunk_id``) and averages
+        hit-rate, MRR, and precision@5. Real numbers only — no placeholders.
+
+        Args:
+            ground_truth_file: Path to the committed ground-truth CSV (columns
+                include ``question`` and ``chunk_id``).
+            modes: Retrieval modes to compare.
+            output_file: Where to write the per-mode aggregate JSON.
+
+        Returns:
+            dict | None: ``{mode: {"hit_rate","mrr","precision"}}`` (also written
+                to ``output_file``), or ``None`` if there is no ground-truth data.
+        """
         ground_truth = self.load_ground_truth(ground_truth_file)
 
         if not ground_truth:
             print("No ground truth data to evaluate")
-            return
+            return None
 
-        # Placeholder evaluation
-        results = {
-            "dense": {"hit_rate": 0.78, "mrr": 0.65, "precision": 0.70},
-            "bm25": {"hit_rate": 0.75, "mrr": 0.60, "precision": 0.68},
-            "hybrid": {"hit_rate": 0.87, "mrr": 0.75, "precision": 0.82}
-        }
+        results: Dict[str, Dict[str, float]] = {}
+        for mode in modes:
+            per_query = [
+                self.evaluate_query(
+                    row["question"],
+                    [row["chunk_id"]],
+                    retrieved_ids(row["question"], mode, top_k=5),
+                    top_k=5,
+                )
+                for row in ground_truth
+            ]
+            n = len(per_query)
+            results[mode] = {
+                "hit_rate": sum(r["hit"] for r in per_query) / n,
+                "mrr": sum(r["mrr"] for r in per_query) / n,
+                "precision": sum(r["precision"] for r in per_query) / n,
+            }
 
         os.makedirs(os.path.dirname(output_file) or ".", exist_ok=True)
-        with open(output_file, 'w') as f:
+        with open(output_file, "w") as f:
             json.dump(results, f, indent=2)
 
         print(f"Evaluation results → {output_file}")
-        for approach, metrics in results.items():
-            print(f"  {approach}: Hit={metrics['hit_rate']:.2%}, MRR={metrics['mrr']:.3f}")
+        for mode, metrics in results.items():
+            print(f"  {mode}: Hit={metrics['hit_rate']:.2%}, MRR={metrics['mrr']:.3f}")
+        return results
 
 
 if __name__ == "__main__":
