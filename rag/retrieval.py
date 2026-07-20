@@ -222,6 +222,59 @@ def rrf_fuse(
     return [{**by_id[hid], "rrf_score": scores[hid]} for hid in ordered]
 
 
+class Reranker:
+    """Cross-encoder reranker over the fused top candidates (BON-01/BON-03).
+
+    Wraps the pinned ``cross-encoder/ms-marco-MiniLM-L6-v2`` model, constructed
+    lazily and once per instance (the first construction downloads ~80MB). The
+    model id is pinned (no ``latest``/arbitrary revision) — supply-chain
+    mitigation T-03-02. This method is synchronous and CPU/torch-bound; the
+    off-loop wrap is the pipeline's job (Plan 03-04).
+    """
+
+    _MODEL_ID = "cross-encoder/ms-marco-MiniLM-L6-v2"
+
+    def __init__(self):
+        """Defer model construction to first use (no download at import/ctor)."""
+        self._model = None
+
+    def _get_model(self):
+        """Construct and cache the pinned cross-encoder on first use.
+
+        Returns:
+            The CrossEncoder instance (lazily imported and constructed once).
+        """
+        if self._model is None:
+            from sentence_transformers import CrossEncoder  # lazy import
+
+            self._model = CrossEncoder(self._MODEL_ID)
+        return self._model
+
+    def rerank(
+        self,
+        query: str,
+        fused: List[Dict[str, Any]],
+        top_k: int = 5,
+    ) -> List[Dict[str, Any]]:
+        """Reorder the fused candidates by cross-encoder relevance to ``query``.
+
+        Args:
+            query: The raw query text.
+            fused: Fused hits (RRF output); capped at the top 20 (D-05).
+            top_k: Number of reranked hits to return.
+
+        Returns:
+            list[dict]: Up to ``top_k`` hits in reranked order, each carrying a
+                ``rerank_score`` while preserving id/cosine ``score``/metadata.
+        """
+        candidates = fused[:20]
+        ranks = self._get_model().rank(query, [c["text"] for c in candidates], top_k=top_k)
+        return [
+            {**candidates[r["corpus_id"]], "rerank_score": float(r["score"])}
+            for r in ranks
+        ]
+
+
 class HybridRetriever:
     """Hybrid search combining dense + BM25 with RRF fusion and cross-encoder reranking"""
 
