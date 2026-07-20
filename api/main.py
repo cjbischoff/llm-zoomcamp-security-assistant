@@ -84,9 +84,12 @@ async def query_endpoint(request: QueryRequest):
 
         return StreamingResponse(answer_generator(), media_type="text/plain")
 
-    except Exception as e:
-        logger.error(f"Query error: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+    except Exception:
+        # Log detail server-side; return a generic message so raw exception
+        # text (host:port, module paths, config) never reaches the client
+        # (WR-02 / D-03 / T-02-12).
+        logger.error("Query error", exc_info=True)
+        raise HTTPException(status_code=500, detail="Internal error")
 
 
 @app.post("/feedback")
@@ -102,9 +105,9 @@ async def feedback_endpoint(query_id: str, feedback: int):
 
         return {"status": "logged"}
 
-    except Exception as e:
-        logger.error(f"Feedback error: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+    except Exception:
+        logger.error("Feedback error", exc_info=True)
+        raise HTTPException(status_code=500, detail="Internal error")
 
 
 @app.get("/metrics")
@@ -116,9 +119,9 @@ async def metrics_endpoint():
         collector = MetricsCollector()
         return collector.get_metrics()
 
-    except Exception as e:
-        logger.error(f"Metrics error: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+    except Exception:
+        logger.error("Metrics error", exc_info=True)
+        raise HTTPException(status_code=500, detail="Internal error")
 
 
 if __name__ == "__main__":
