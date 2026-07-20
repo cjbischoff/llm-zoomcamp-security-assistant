@@ -108,6 +108,7 @@ def run_judge_line(
     ground_truth: List[Dict[str, Any]],
     winner_mode: str,
     results_dir: str = DEFAULT_RESULTS_DIR,
+    apply_gate: bool = False,
 ) -> tuple:
     """Generate answers for both variants over the winning mode and judge them.
 
@@ -120,6 +121,13 @@ def run_judge_line(
         ground_truth: Loaded ground-truth rows (``question``/``answer``/...).
         winner_mode: The retrieval mode chosen as the production default.
         results_dir: Where to write the detailed judged records JSON.
+        apply_gate: When ``True``, mirror the production 0.4 grounding gate
+            (``rag/pipeline.py``): if a pair's dense-cosine ``gate_score`` is
+            below ``SCORE_FLOOR`` (or there are no hits), record the fixed refuse
+            message as the answer and judge THAT — modelling real user-facing
+            behavior for the ~15% of questions that miss (WR-04). Defaults to
+            ``False`` so the committed report's ungated numbers stay reproducible;
+            enable with ``--apply-gate`` for a gated methodology run.
 
     Returns:
         tuple: ``(aggregates, detail_records)`` where ``aggregates`` is the
@@ -128,8 +136,9 @@ def run_judge_line(
             context, gold, scores) used to build the human spot-check.
     """
     from evaluation.eval_llm import LLMEvaluator
-    from evaluation.eval_retrieval import retrieve_hits
+    from evaluation.eval_retrieval import retrieve_result
     from rag.generator import LLMGenerator
+    from rag.pipeline import SCORE_FLOOR, _MSG_REFUSE
 
     judge = LLMEvaluator()
     generator = LLMGenerator()
@@ -141,15 +150,28 @@ def run_judge_line(
         question = row["question"]
         gold = row.get("answer", "")
         try:
-            hits = retrieve_hits(question, winner_mode, top_k=5)
+            result = retrieve_result(question, winner_mode, top_k=5)
         except Exception:
             logger.error("Retrieval failed for a pair — skipping", exc_info=True)
             continue
+        if result.get("status") != "ok":
+            logger.warning(
+                "Retrieval status %r for mode %r — scoring as no hits", result.get("status"), winner_mode
+            )
+            hits: List[Dict[str, Any]] = []
+            gate_score = 0.0
+        else:
+            hits = result["hits"]
+            gate_score = result.get("gate_score", 0.0)
         context = assemble_context(hits)
+
+        # Mirror the production 0.4 gate only when explicitly requested (WR-04):
+        # a below-floor / no-hit pair refuses in production, so score the refusal.
+        gated_out = apply_gate and (not hits or gate_score < SCORE_FLOOR)
 
         for variant in _VARIANTS:
             try:
-                answer = _drain_answer(generator, question, context, variant)
+                answer = _MSG_REFUSE if gated_out else _drain_answer(generator, question, context, variant)
                 scores = judge.judge_answer(question, answer, context, gold)
             except Exception:
                 logger.error("Judge/generation failed for a pair — skipping", exc_info=True)
@@ -191,6 +213,7 @@ def build_report(
     winner_mode: str,
     judge_aggregates: Dict[str, Dict[str, float]],
     gt_path: str = DEFAULT_GT,
+    apply_gate: bool = False,
 ) -> str:
     """Assemble the grader-readable ``EVALUATION.md`` body (D-11).
 
@@ -204,10 +227,24 @@ def build_report(
         winner_mode: The mode chosen as the production default.
         judge_aggregates: ``{variant: {"accuracy","completeness","hallucination"}}``.
         gt_path: Path to the committed ground-truth CSV (referenced in the report).
+        apply_gate: Whether the judge line mirrored the production 0.4 gate;
+            disclosed in the LLM-as-Judge section so the reader knows whether the
+            scores are gated or ungated (WR-04).
 
     Returns:
         str: The full Markdown report body.
     """
+    gate_disclosure = (
+        "The judge line applies the production 0.4 grounding gate: a below-floor "
+        "pair is scored on the fixed refuse message, matching real user-facing "
+        "behavior (WR-04)."
+        if apply_gate
+        else "The judge line scores answers **ungated** — it generates over the "
+        "retrieved context for every pair, including the ~15% that miss the 0.4 "
+        "grounding gate in production. Judge scores therefore measure generation "
+        "quality over retrieved context, not the production refuse path; re-run "
+        "with `--apply-gate` to mirror the gate (WR-04)."
+    )
     counts = _per_source_counts(ground_truth)
     src_lines = "\n".join(f"| {src} | {n} |" for src, n in sorted(counts.items()))
 
@@ -313,6 +350,8 @@ The winning mode is wired as the production default `retrieval_mode` in both
 Mean judge scores (1-5, higher is better) per prompt variant over the winning
 mode's retrieved context:
 
+{gate_disclosure}
+
 | Variant | Accuracy | Completeness | Hallucination (grounded) |
 |---------|----------|--------------|--------------------------|
 {judge_rows}
@@ -372,6 +411,7 @@ def run(
     per_source: int = 8,
     seed: int = 42,
     pairs_cap: int = 0,
+    apply_gate: bool = False,
 ) -> Dict[str, Any]:
     """Run the full evaluation and write the report + intermediate results.
 
@@ -383,6 +423,8 @@ def run(
         seed: Deterministic sampling seed.
         pairs_cap: If > 0, cap the ground truth to the first N pairs (fast smoke
             runs); 0 uses the full set.
+        apply_gate: Mirror the production 0.4 grounding gate in the judge line
+            (WR-04); off by default so the committed ungated numbers reproduce.
 
     Returns:
         dict: ``{"winner", "retrieval", "judge", "n_pairs"}`` summary.
@@ -416,9 +458,13 @@ def run(
     winner = pick_winner(retrieval_results)
     logger.info("Winning retrieval mode: %s", winner)
 
-    judge_aggregates, _detail = run_judge_line(ground_truth, winner, results_dir=results_dir)
+    judge_aggregates, _detail = run_judge_line(
+        ground_truth, winner, results_dir=results_dir, apply_gate=apply_gate
+    )
 
-    report = build_report(ground_truth, retrieval_results, winner, judge_aggregates, gt_path=gt_path)
+    report = build_report(
+        ground_truth, retrieval_results, winner, judge_aggregates, gt_path=gt_path, apply_gate=apply_gate
+    )
     # Never overwrite a hand-filled Human Spot-Check with the placeholder (WR-03).
     report = _preserve_spot_check(report, report_path)
     os.makedirs(os.path.dirname(report_path) or ".", exist_ok=True)
@@ -443,6 +489,12 @@ def main() -> None:
     parser.add_argument("--pairs", type=int, default=0, help="Cap ground truth to first N pairs (0 = all)")
     parser.add_argument("--ground-truth", default=DEFAULT_GT, help="Ground-truth CSV path")
     parser.add_argument("--report", default=DEFAULT_REPORT, help="Output report path")
+    parser.add_argument(
+        "--apply-gate",
+        action="store_true",
+        help="Mirror the production 0.4 grounding gate in the judge line (WR-04); "
+        "off by default (the committed report uses ungated scores)",
+    )
     args = parser.parse_args()
 
     run(
@@ -451,6 +503,7 @@ def main() -> None:
         per_source=args.per_source,
         seed=args.seed,
         pairs_cap=args.pairs,
+        apply_gate=args.apply_gate,
     )
 
 

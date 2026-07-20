@@ -44,14 +44,46 @@ def _get_retrievers():
     return _embedder, _dense, _hybrid
 
 
+def retrieve_result(question: str, mode: str, top_k: int = 5) -> Dict[str, Any]:
+    """Retrieve the FULL retriever result dict (hits + status + gate_score).
+
+    Embeds the raw question once and drives the real retrievers so retrieval is
+    run a single time. The comparison is kept uniform across modes (raw-question
+    embed, ``detected_id=None``) so mode differences reflect retrieval quality,
+    not the rewriter's soft-boost (research Open Question 2).
+
+    The returned ``gate_score`` is the DENSE COSINE reference — never a fusion or
+    cross-encoder score — matching the 0.4 grounding gate in
+    ``rag/pipeline.py`` (Pitfall 3): dense mode uses the top hit's cosine, the
+    hybrid modes read the retriever's own ``gate_score``. This lets the judge
+    line optionally mirror the production gate (WR-04).
+
+    Args:
+        question: The raw ground-truth question.
+        mode: One of ``"dense"``, ``"hybrid"``, ``"hybrid_rerank"``.
+        top_k: Number of hits to return.
+
+    Returns:
+        dict: The retriever's result dict with a ``gate_score`` key guaranteed.
+    """
+    embedder, dense, hybrid = _get_retrievers()
+    qvec = embedder.embed([question])[0]  # 1536-dim, matches the collection
+    if mode == "dense":
+        result = dense.retrieve(qvec, top_k=top_k)
+        # The dense top-hit score IS the cosine reference the production gate reads.
+        result.setdefault("gate_score", result["hits"][0]["score"] if result["hits"] else 0.0)
+    else:  # hybrid | hybrid_rerank
+        result = hybrid.retrieve(
+            qvec, question, detected_id=None, top_k=top_k, rerank=(mode == "hybrid_rerank")
+        )
+    return result
+
+
 def retrieve_hits(question: str, mode: str, top_k: int = 5) -> List[Dict[str, Any]]:
     """Retrieve the full hit dicts for ``question`` in the given ``mode``.
 
-    Embeds the raw question once and drives the real retrievers so retrieval is
-    run a single time (the judge line reuses these hits to assemble context).
-    The comparison is kept uniform across modes (raw-question embed,
-    ``detected_id=None``) so mode differences reflect retrieval quality, not the
-    rewriter's soft-boost (research Open Question 2).
+    Thin wrapper over :func:`retrieve_result` that drops the envelope and returns
+    just the hits (the retrieval eval only needs the joined ids).
 
     Args:
         question: The raw ground-truth question.
@@ -63,14 +95,7 @@ def retrieve_hits(question: str, mode: str, top_k: int = 5) -> List[Dict[str, An
             ``[]`` when the retriever status is not ``"ok"`` (RET-02 — an outage
             yields no hits and is logged, never silently scored as a miss).
     """
-    embedder, dense, hybrid = _get_retrievers()
-    qvec = embedder.embed([question])[0]  # 1536-dim, matches the collection
-    if mode == "dense":
-        result = dense.retrieve(qvec, top_k=top_k)
-    else:  # hybrid | hybrid_rerank
-        result = hybrid.retrieve(
-            qvec, question, detected_id=None, top_k=top_k, rerank=(mode == "hybrid_rerank")
-        )
+    result = retrieve_result(question, mode, top_k)
     if result["status"] != "ok":
         logger.warning("Retrieval status %r for mode %r — scoring as no hits", result["status"], mode)
         return []
