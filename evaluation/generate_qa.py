@@ -3,9 +3,9 @@
 Ground truth is sampled by scrolling the live Qdrant collection (source of
 truth) so each row carries the REAL uuid5 point id as ``chunk_id`` — the
 relevance-join key the retrieval eval depends on (Research Pitfall 1). The
-scaffold's ``data/chunks.json`` read and ``chunk_id=i`` enumeration index are
-gone: an int index never matches a retrieved hit's uuid and silently zeroes
-every retrieval metric.
+scaffold's non-existent local-JSON read and ``chunk_id=i`` enumeration index
+are gone: an int index never matches a retrieved hit's uuid and silently
+zeroes every retrieval metric.
 """
 
 import argparse
@@ -145,29 +145,55 @@ Generate practical questions (not trivial). Be concise."""
             end = content.rfind(']') + 1
             if start >= 0 and end > start:
                 qa_data = json.loads(content[start:end])
-                return qa_data if isinstance(qa_data, list) else [qa_data]
-            return []
+                rows = qa_data if isinstance(qa_data, list) else [qa_data]
+            else:
+                rows = []
         except Exception as e:
             print(f"Error generating Q&A: {e}")
             return []
 
-    def generate_all_qa(self, chunks_file: str, output_file: str = "evaluation/ground_truth.csv"):
-        """Generate Q&A for all chunks in JSON file"""
-        # Load chunks
-        if not os.path.exists(chunks_file):
-            print(f"Chunks file not found: {chunks_file}")
-            return
+        # Code-stamp the join key + source from the arguments, never the model:
+        # a stray/injected model value must not corrupt the relevance-join key
+        # (T-04-02). chunk_id stays the real uuid5 point id passed in.
+        for row in rows:
+            row["chunk_id"] = chunk_id
+            row["source"] = source
+        return rows
 
-        with open(chunks_file) as f:
-            chunks = json.load(f)
+    def generate_all_qa(
+        self,
+        output_file: str = "evaluation/ground_truth.csv",
+        client: Optional[Any] = None,
+        collection: Optional[str] = None,
+        per_source: int = 8,
+        seed: int = 42,
+    ):
+        """Sample the live Qdrant collection, generate Q&A, write ground_truth.csv.
+
+        Samples ~``per_source`` chunks per source (D-01) via :func:`sample_chunks`,
+        authors Q&A for each with ``gpt-4o-mini`` (D-02), and writes a CSV whose
+        ``chunk_id`` is the REAL uuid5 point id (the relevance-join key), never an
+        enumeration index. The CSV header is the single source of truth for both
+        eval lines (D-03): ``question, answer, chunk_id, source``.
+
+        Args:
+            output_file: Destination CSV path.
+            client: Optional injected ``QdrantClient`` (offline test seam).
+            collection: Qdrant collection; defaults to env ``QDRANT_COLLECTION_NAME``.
+            per_source: Max chunks sampled per source.
+            seed: Seed for deterministic sampling.
+        """
+        chunks = sample_chunks(
+            client=client, collection=collection, per_source=per_source, seed=seed
+        )
 
         all_qa = []
         for i, chunk in enumerate(chunks):
-            print(f"Generating Q&A for chunk {i+1}/{len(chunks)}...")
+            print(f"Generating Q&A for chunk {i + 1}/{len(chunks)}...")
             qa_pairs = self.generate_qa_for_chunk(
-                chunk.get("text", ""),
-                chunk_id=i,
-                source=chunk.get("metadata", {}).get("source", "unknown")
+                chunk["text"],
+                chunk_id=chunk["id"],  # REAL uuid5 point id, not an index
+                source=chunk["source"],
             )
             all_qa.extend(qa_pairs)
 
@@ -182,5 +208,17 @@ Generate practical questions (not trivial). Be concise."""
 
 
 if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description="Generate ground-truth Q&A from the Qdrant corpus")
+    parser.add_argument("--per-source", type=int, default=8, help="Max chunks sampled per source")
+    parser.add_argument("--seed", type=int, default=42, help="Deterministic sampling seed")
+    parser.add_argument("--collection", default=None, help="Qdrant collection (default: env)")
+    parser.add_argument("--output", default="evaluation/ground_truth.csv", help="Output CSV path")
+    args = parser.parse_args()
+
     generator = QAGenerator()
-    generator.generate_all_qa("data/chunks.json")
+    generator.generate_all_qa(
+        output_file=args.output,
+        collection=args.collection,
+        per_source=args.per_source,
+        seed=args.seed,
+    )
