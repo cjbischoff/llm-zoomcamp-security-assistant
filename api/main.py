@@ -2,7 +2,7 @@
 
 import os
 import logging
-from typing import AsyncGenerator, Optional
+from typing import AsyncGenerator, Literal, Optional
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
@@ -28,6 +28,11 @@ class QueryRequest(BaseModel):
     # for real security questions; full injection guardrails are HRD-02 (v2).
     query: str = Field(..., max_length=4000)
     prompt_variant: str = "practitioner"  # "practitioner" (default, D-05) or "base"
+    # Enum-bound at the trust boundary (Security V5, T-03-04): an out-of-enum value
+    # is a 422 at request validation — same discipline as the max_length cap —
+    # so the pipeline never dispatches on an untrusted raw string. dense is the
+    # default fast path (D-06).
+    retrieval_mode: Literal["dense", "hybrid", "hybrid_rerank"] = "dense"
     user_id: Optional[str] = None
 
 
@@ -68,7 +73,8 @@ async def query_endpoint(request: QueryRequest):
             async for token in pipeline.stream_answer(
                 query=request.query,
                 user_id=request.user_id,
-                prompt_variant=request.prompt_variant
+                prompt_variant=request.prompt_variant,
+                retrieval_mode=request.retrieval_mode
             ):
                 yield token
 

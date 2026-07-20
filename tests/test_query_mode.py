@@ -135,12 +135,25 @@ def test_unknown_mode_normalizes_to_dense(mocker, collect_stream):
 
 
 def test_query_rejects_invalid_retrieval_mode():
-    """/query returns 422 for an out-of-enum retrieval_mode, before any pipeline work."""
-    from fastapi.testclient import TestClient
+    """/query returns 422 for an out-of-enum retrieval_mode, before any pipeline work.
+
+    Driven through the ASGI stack with httpx's ASGITransport (version-agnostic
+    across httpx releases) on a stdlib event loop — network-free: validation
+    rejects the request before the route body ever constructs a pipeline.
+    """
+    import asyncio
+
+    import httpx
     from api.main import app
 
-    client = TestClient(app)
-    resp = client.post("/query", json={"query": "hi", "retrieval_mode": "bogus"})
+    async def _post():
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+            return await client.post(
+                "/query", json={"query": "hi", "retrieval_mode": "bogus"}
+            )
+
+    resp = asyncio.run(_post())
     assert resp.status_code == 422  # rejected at request validation, no pipeline built
 
 
