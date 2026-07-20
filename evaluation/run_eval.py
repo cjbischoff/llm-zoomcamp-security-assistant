@@ -331,6 +331,40 @@ _Notes:_ _to be filled at the live-run checkpoint._
 """
 
 
+_SPOT_CHECK_HEADING = "## Human Spot-Check"
+
+
+def _preserve_spot_check(new_report: str, existing_path: str) -> str:
+    """Splice an existing report's Human Spot-Check section into a fresh report.
+
+    ``build_report`` always emits the spot-check as an empty placeholder, but the
+    committed ``EVALUATION.md`` carries a manually authored spot-check table +
+    notes — the human half of the D-10 circularity mitigation. Regeneration must
+    NOT clobber that graded content (WR-03). The spot-check is the final section,
+    so we replace everything from ``## Human Spot-Check`` onward in the new
+    report with the same tail from the existing file.
+
+    Args:
+        new_report: The freshly generated report body (placeholder spot-check).
+        existing_path: Path to the currently committed report, if any.
+
+    Returns:
+        str: ``new_report`` with its placeholder spot-check replaced by the
+            existing file's hand-filled section. Returned unchanged when there is
+            no existing file or neither side has the heading.
+    """
+    if not os.path.exists(existing_path):
+        return new_report
+    with open(existing_path) as f:
+        old = f.read()
+    if _SPOT_CHECK_HEADING not in old or _SPOT_CHECK_HEADING not in new_report:
+        return new_report
+    return (
+        new_report[: new_report.index(_SPOT_CHECK_HEADING)]
+        + old[old.index(_SPOT_CHECK_HEADING) :]
+    )
+
+
 def run(
     gt_path: str = DEFAULT_GT,
     report_path: str = DEFAULT_REPORT,
@@ -385,6 +419,8 @@ def run(
     judge_aggregates, _detail = run_judge_line(ground_truth, winner, results_dir=results_dir)
 
     report = build_report(ground_truth, retrieval_results, winner, judge_aggregates, gt_path=gt_path)
+    # Never overwrite a hand-filled Human Spot-Check with the placeholder (WR-03).
+    report = _preserve_spot_check(report, report_path)
     os.makedirs(os.path.dirname(report_path) or ".", exist_ok=True)
     with open(report_path, "w") as f:
         f.write(report)
