@@ -83,7 +83,9 @@ class RAGPipeline:
         # degrade to the same fixed, non-leaking message as a retrieval outage
         # (WR-01 / D-03). A raw raise would abort the stream mid-response.
         try:
-            qvec = self.embedder.embed([embed_text])[0]
+            # Synchronous OpenAI HTTP call — offload so it never blocks the
+            # event loop (BON-01), matching the hybrid/rerank leg below.
+            qvec = (await asyncio.to_thread(self.embedder.embed, [embed_text]))[0]
         except Exception:
             logger.error("Embedding backend failed", exc_info=True)
             yield _MSG_BACKEND_DOWN
@@ -91,7 +93,9 @@ class RAGPipeline:
 
         # Step 2b: Route by mode. Hybrid/rerank run off the event loop (BON-01).
         if retrieval_mode == "dense":
-            result = self.retriever.retrieve(qvec, top_k=top_k)
+            # Synchronous Qdrant query — offload off the event loop (BON-01);
+            # dense is the default fast path, so this is the common case.
+            result = await asyncio.to_thread(self.retriever.retrieve, qvec, top_k)
             gate_score = result["hits"][0]["score"] if result["hits"] else 0.0
         else:
             result = await asyncio.to_thread(
