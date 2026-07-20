@@ -50,7 +50,10 @@ def test_eval_pipeline_smoke_live(qdrant_client, openai_available):
 
     # 4. The judge parses one answer to the three integer D-10 dimensions.
     scores = LLMEvaluator().judge_answer(
-        query=pair["question"], answer=pair["answer"], context=chunk["text"]
+        question=pair["question"],
+        answer=pair["answer"],
+        context=chunk["text"],
+        gold_answer=pair["answer"],
     )
     for dim in ("accuracy", "completeness", "hallucination"):
         assert isinstance(scores[dim], int)
