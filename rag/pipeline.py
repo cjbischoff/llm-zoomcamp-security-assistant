@@ -1,6 +1,7 @@
 """Full RAG pipeline orchestration"""
 
 import asyncio
+import logging
 import time
 from typing import AsyncGenerator, Optional
 from rag.rewriter import QueryRewriter
@@ -8,6 +9,8 @@ from rag.retrieval import DenseRetriever, HybridRetriever
 from rag.generator import LLMGenerator
 from ingestion.transforms.embed import Embedder
 from monitoring.logging import QueryLogger
+
+logger = logging.getLogger(__name__)
 
 # retrieval_mode enum — validated at the trust boundary; never dispatch on the
 # raw string (Security V5). dense is the default fast interactive path (D-06).
@@ -75,7 +78,16 @@ class RAGPipeline:
         # hybrid modes, feeds the soft-boost); dense keeps its Phase-2 behavior.
         embed_text = f"{detected_id} {query}" if detected_id else query
         retrieval_start = time.time()
-        qvec = self.embedder.embed([embed_text])[0]
+        # Embedding runs inside the streaming body (after the endpoint's
+        # try/except has exited), so an OpenAI outage must be caught here and
+        # degrade to the same fixed, non-leaking message as a retrieval outage
+        # (WR-01 / D-03). A raw raise would abort the stream mid-response.
+        try:
+            qvec = self.embedder.embed([embed_text])[0]
+        except Exception:
+            logger.error("Embedding backend failed", exc_info=True)
+            yield _MSG_BACKEND_DOWN
+            return
 
         # Step 2b: Route by mode. Hybrid/rerank run off the event loop (BON-01).
         if retrieval_mode == "dense":
