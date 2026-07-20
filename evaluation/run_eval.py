@@ -207,6 +207,77 @@ def _per_source_counts(ground_truth: List[Dict[str, Any]]) -> Dict[str, int]:
     return counts
 
 
+def _production_defaults() -> Dict[str, Any]:
+    """Read the live production ``retrieval_mode`` defaults (lazy, offline-safe).
+
+    Reads the default declared in ``RAGPipeline.stream_answer`` and in
+    ``api.main.QueryRequest`` so :func:`build_report` can VERIFY the elected
+    winner is actually wired rather than merely claim it (WR-05). The sync is
+    manual (research Pitfall 5); this makes a drift visible in the report.
+    Imports are deferred and any failure degrades to ``None`` (reported as
+    "unverified") — reading the defaults never aborts the report.
+
+    Returns:
+        dict: ``{"pipeline": <default|None>, "api": <default|None>}``.
+    """
+    import inspect
+
+    defaults: Dict[str, Any] = {"pipeline": None, "api": None}
+    try:
+        from rag.pipeline import RAGPipeline
+
+        defaults["pipeline"] = (
+            inspect.signature(RAGPipeline.stream_answer).parameters["retrieval_mode"].default
+        )
+    except Exception:
+        logger.warning("Could not read RAGPipeline.stream_answer default", exc_info=True)
+    try:
+        from api.main import QueryRequest
+
+        defaults["api"] = QueryRequest.model_fields["retrieval_mode"].default
+    except Exception:
+        logger.warning("Could not read QueryRequest.retrieval_mode default", exc_info=True)
+    return defaults
+
+
+def _wiring_status(winner_mode: str, defaults: Dict[str, Any]) -> str:
+    """Report whether ``winner_mode`` matches the production defaults (WR-05).
+
+    Args:
+        winner_mode: The elected winning retrieval mode.
+        defaults: The ``{"pipeline","api"}`` defaults from :func:`_production_defaults`.
+
+    Returns:
+        str: A confirmation line when both defaults equal the winner, or an
+            explicit ``MISMATCH`` warning naming the diverging source(s) so a
+            future run that elects a different winner cannot silently emit a
+            false "wired as default" claim.
+    """
+    pipeline_default = defaults.get("pipeline")
+    api_default = defaults.get("api")
+    matches = [
+        src
+        for src, val in (("rag/pipeline.py", pipeline_default), ("api/main.py", api_default))
+        if val == winner_mode
+    ]
+    if len(matches) == 2:
+        return (
+            f"The winning mode is wired as the production default `retrieval_mode` in both "
+            f"`rag/pipeline.py` and `api/main.py` (verified against the live defaults — "
+            f"research Pitfall 5)."
+        )
+    detail = ", ".join(
+        f"`{src}` = `{val}`"
+        for src, val in (("rag/pipeline.py", pipeline_default), ("api/main.py", api_default))
+    )
+    return (
+        f"⚠️ **MISMATCH — update the production defaults.** The elected winner is "
+        f"`{winner_mode}`, but the current defaults are {detail}. The eval does not "
+        f"rewrite these; sync them manually so production serves the winning mode "
+        f"(research Pitfall 5). (A `None` above means the default could not be read.)"
+    )
+
+
 def build_report(
     ground_truth: List[Dict[str, Any]],
     retrieval_results: Dict[str, Dict[str, float]],
@@ -257,6 +328,8 @@ def build_report(
         f"| {variant} | {s['accuracy']:.2f} | {s['completeness']:.2f} | {s['hallucination']:.2f} |"
         for variant, s in judge_aggregates.items()
     )
+
+    wiring_status = _wiring_status(winner_mode, _production_defaults())
 
     latency_note = {
         "dense": "`dense` is the fast interactive path — a single Qdrant cosine query, "
@@ -340,10 +413,7 @@ Hit-rate / MRR / precision@5 across the three modes on the ground-truth set:
 
 {latency_note}
 
-The winning mode is wired as the production default `retrieval_mode` in both
-`rag/pipeline.py` and `api/main.py` (kept in sync — research Pitfall 5), or, if
-`dense` wins, the current default stands and that is recorded as the finding
-(D-08 explicitly allows this).
+{wiring_status}
 
 ## LLM-as-Judge
 
