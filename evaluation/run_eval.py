@@ -367,8 +367,14 @@ def run(
     if pairs_cap > 0:
         ground_truth = ground_truth[:pairs_cap]
 
+    # Drive retrieval over the SAME (possibly --pairs-capped) rows the judge
+    # line uses, so a smoke run stays fast and the report is internally
+    # consistent (WR-01) — never silently re-expanding to the full CSV.
     retrieval_results = evaluator.evaluate_all(
-        gt_path, modes=_MODES, output_file=os.path.join(results_dir, "retrieval_eval.json")
+        gt_path,
+        modes=_MODES,
+        output_file=os.path.join(results_dir, "retrieval_eval.json"),
+        rows=ground_truth,
     )
     if retrieval_results is None:
         raise RuntimeError("Retrieval evaluation returned no results")

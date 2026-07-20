@@ -141,6 +141,7 @@ class RetrieverEvaluator:
         ground_truth_file: str,
         modes: tuple = ("dense", "hybrid", "hybrid_rerank"),
         output_file: str = "evaluation/results/retrieval_eval.json",
+        rows: Optional[List[Dict]] = None,
     ) -> Optional[Dict[str, Dict[str, float]]]:
         """Evaluate every ground-truth pair across all three retrieval modes.
 
@@ -150,15 +151,20 @@ class RetrieverEvaluator:
 
         Args:
             ground_truth_file: Path to the committed ground-truth CSV (columns
-                include ``question`` and ``chunk_id``).
+                include ``question`` and ``chunk_id``). Ignored when ``rows`` is
+                supplied.
             modes: Retrieval modes to compare.
             output_file: Where to write the per-mode aggregate JSON.
+            rows: Pre-loaded ground-truth rows. When provided, these are used
+                as-is and the CSV is NOT re-read — so a caller-applied ``--pairs``
+                cap is honored instead of silently re-expanding to the full file
+                (WR-01).
 
         Returns:
             dict | None: ``{mode: {"hit_rate","mrr","precision"}}`` (also written
                 to ``output_file``), or ``None`` if there is no ground-truth data.
         """
-        ground_truth = self.load_ground_truth(ground_truth_file)
+        ground_truth = rows if rows is not None else self.load_ground_truth(ground_truth_file)
 
         if not ground_truth:
             print("No ground truth data to evaluate")
