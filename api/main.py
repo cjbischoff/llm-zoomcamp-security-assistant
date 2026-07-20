@@ -27,7 +27,11 @@ class QueryRequest(BaseModel):
     # bodies are rejected with a 422 before embedding/generation. Generous enough
     # for real security questions; full injection guardrails are HRD-02 (v2).
     query: str = Field(..., max_length=4000)
-    prompt_variant: str = "practitioner"  # "practitioner" (default, D-05) or "base"
+    # Enum-bound at the trust boundary (Security V5, T-03-04, CR-01): an
+    # out-of-enum value is a 422 at request validation — same discipline as
+    # retrieval_mode below — so the generator's ValueError branch is unreachable
+    # from the network boundary. "practitioner" is the default (D-05).
+    prompt_variant: Literal["practitioner", "base"] = "practitioner"
     # Enum-bound at the trust boundary (Security V5, T-03-04): an out-of-enum value
     # is a 422 at request validation — same discipline as the max_length cap —
     # so the pipeline never dispatches on an untrusted raw string. dense is the
