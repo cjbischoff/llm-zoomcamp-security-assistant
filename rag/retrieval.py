@@ -189,21 +189,103 @@ class BM25Retriever:
         ]
 
 
+def rrf_fuse(
+    dense_hits: List[Dict[str, Any]],
+    bm25_hits: List[Dict[str, Any]],
+    k: int = 60,
+) -> List[Dict[str, Any]]:
+    """Fuse two ranked hit lists via Reciprocal Rank Fusion, joined on point id.
+
+    Each list contributes ``1/(k + rank)`` (1-based rank) to a doc's fused
+    score. The join key is the point ``id`` (never text). Dense-first precedence:
+    a doc in both legs keeps its dense hit, so the cosine ``score`` survives for
+    the downstream 0.4 gate.
+
+    Args:
+        dense_hits: Dense leg hits, each ``{"id","text","score","metadata"}``.
+        bm25_hits: BM25 leg hits, same shape (``score`` is the BM25 score).
+        k: RRF constant (default 60).
+
+    Returns:
+        list[dict]: Fused hits sorted by descending fused score, each carrying a
+            numeric ``rrf_score`` alongside the preserved original fields.
+    """
+    scores: Dict[Any, float] = {}
+    by_id: Dict[Any, Dict[str, Any]] = {}
+    for hits in (dense_hits, bm25_hits):
+        for rank, hit in enumerate(hits, start=1):
+            hid = hit["id"]
+            scores[hid] = scores.get(hid, 0.0) + 1.0 / (k + rank)
+            by_id.setdefault(hid, hit)  # dense-first precedence (cosine survives)
+
+    ordered = sorted(scores, key=lambda hid: scores[hid], reverse=True)
+    return [{**by_id[hid], "rrf_score": scores[hid]} for hid in ordered]
+
+
 class HybridRetriever:
     """Hybrid search combining dense + BM25 with RRF fusion and cross-encoder reranking"""
 
     def __init__(self, collection_name: Optional[str] = None):
         self.collection_name = collection_name or os.getenv("QDRANT_COLLECTION_NAME", "security_rag")
         self.dense = DenseRetriever(collection_name)
-        self.bm25 = BM25Retriever()
+        self.bm25 = BM25Retriever(collection_name=self.collection_name)
+        self._reranker = None  # lazy: built on first rerank=True call
 
-    def retrieve(self, query_embedding: List[float], query_text: str, top_k: int = 5) -> List[Dict[str, Any]]:
-        """Hybrid search with RRF fusion"""
-        # Get dense results (retrieve() now returns a {status, hits} channel)
-        dense_results = self.dense.retrieve(query_embedding, top_k=10)["hits"]
+    def retrieve(
+        self,
+        query_embedding: List[float],
+        query_text: str,
+        detected_id: Optional[str] = None,
+        top_k: int = 5,
+        rerank: bool = False,
+    ) -> Dict[str, Any]:
+        """Fuse dense + BM25 by RRF, soft-boost a detected threat, optionally rerank.
 
-        # Get BM25 results
-        bm25_results = self.bm25.retrieve(query_text, top_k=10)
+        Args:
+            query_embedding: The embedded query vector (dense leg).
+            query_text: The raw query text (BM25 + rerank legs).
+            detected_id: An optional canonical threat id; matching chunks get a
+                small rank boost (soft-boost, D-04) without dropping others.
+            top_k: Number of hits to return.
+            rerank: When True, reorder the fused top candidates with the
+                cross-encoder reranker.
 
-        # Combine results (simplified: just return dense for now)
-        return dense_results[:top_k]
+        Returns:
+            ``{"status", "hits", "gate_score"}`` where ``status`` propagates the
+            dense leg's status (so an outage is never masked), ``gate_score`` is
+            the max dense cosine (the 0.4 gate reference — never a BM25 score),
+            and each hit preserves its cosine ``score``.
+        """
+        dense_result = self.dense.retrieve(query_embedding, top_k=20)
+        if dense_result["status"] != "ok":
+            return {"status": dense_result["status"], "hits": [], "gate_score": 0.0}
+
+        dense_hits = dense_result["hits"]
+        gate_score = max((h["score"] for h in dense_hits), default=0.0)
+
+        try:
+            bm25_hits = self.bm25.retrieve(query_text, top_k=20)
+            fused = rrf_fuse(dense_hits, bm25_hits, k=60)
+        except Exception as e:  # noqa: BLE001 - degrade, never leak (Security V7)
+            logger.error("BM25/fusion failed, falling back to dense: %s", e)
+            fused = [{**h, "rrf_score": 0.0} for h in dense_hits]
+
+        if detected_id:
+            boost = 0.5 / 60
+            for hit in fused:
+                if hit.get("metadata", {}).get("threat_id") == detected_id:
+                    hit["rrf_score"] += boost
+            fused.sort(key=lambda h: h["rrf_score"], reverse=True)
+
+        if rerank:
+            try:
+                if self._reranker is None:
+                    self._reranker = Reranker()
+                hits = self._reranker.rerank(query_text, fused, top_k=top_k)
+            except Exception as e:  # noqa: BLE001 - degrade, never leak (Security V7)
+                logger.error("Rerank failed, falling back to fused: %s", e)
+                hits = fused[:top_k]
+        else:
+            hits = fused[:top_k]
+
+        return {"status": "ok", "hits": hits, "gate_score": gate_score}
