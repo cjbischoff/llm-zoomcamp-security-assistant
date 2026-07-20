@@ -4,7 +4,7 @@ import os
 import logging
 from typing import AsyncGenerator, Literal, Optional
 from fastapi import FastAPI, HTTPException
-from fastapi.responses import StreamingResponse
+from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel, Field
 from dotenv import load_dotenv
 
@@ -46,17 +46,47 @@ class HealthResponse(BaseModel):
     services: dict
 
 
-@app.get("/health", response_model=HealthResponse)
+@app.get("/health")
 async def health_check():
-    """Health check endpoint"""
-    return {
-        "status": "healthy",
-        "services": {
-            "qdrant": "connected",
-            "postgres": "connected",
-            "openai": "configured"
-        }
-    }
+    """Health check endpoint.
+
+    Probes the real dependencies rather than asserting health unconditionally
+    (WR-04): a check that cannot fail is worse than none. Qdrant is probed with
+    a short-timeout ``get_collections()``; the OpenAI key is checked for
+    presence (no billed API call). Postgres logging is still a Phase-5
+    placeholder (``monitoring.logging`` does not open a connection yet), so it
+    is reported ``"unverified"`` rather than falsely ``"connected"``.
+
+    Returns a 503 when a critical dependency (Qdrant) is unreachable so
+    orchestration/monitoring can restart or alert.
+    """
+    services = {}
+
+    # Qdrant — the one live, critical dependency for retrieval.
+    try:
+        from qdrant_client import QdrantClient
+
+        client = QdrantClient(
+            host=os.getenv("QDRANT_HOST", "localhost"),
+            port=int(os.getenv("QDRANT_PORT", 6333)),
+            timeout=2,
+            check_compatibility=False,
+        )
+        client.get_collections()
+        services["qdrant"] = "connected"
+    except Exception:
+        logger.error("Health check: Qdrant probe failed", exc_info=True)
+        services["qdrant"] = "unavailable"
+
+    # OpenAI — presence check only; a live call would bill every health probe.
+    services["openai"] = "configured" if os.getenv("OPENAI_API_KEY") else "unconfigured"
+
+    # Postgres logging is a Phase-5 placeholder — no connection to probe yet.
+    services["postgres"] = "unverified"
+
+    healthy = services["qdrant"] == "connected" and services["openai"] == "configured"
+    payload = {"status": "healthy" if healthy else "degraded", "services": services}
+    return JSONResponse(status_code=200 if healthy else 503, content=payload)
 
 
 @app.post("/query")
