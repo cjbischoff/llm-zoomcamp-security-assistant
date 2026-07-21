@@ -7,7 +7,10 @@ services:
       POSTGRES_PASSWORD: password
       POSTGRES_DB: security_rag
     ports:
-      - "5432:5432"
+      # Loopback-only: host dev + live pytest reach localhost:5432, but the
+      # datastore is not exposed to the LAN (WR-02). Internal compose services
+      # reach it over security_rag_net regardless.
+      - "127.0.0.1:5432:5432"
     volumes:
       - postgres_data:/var/lib/postgresql/data
     healthcheck:
@@ -22,7 +25,9 @@ services:
     image: qdrant/qdrant:latest
     container_name: security_rag_qdrant
     ports:
-      - "6333:6333"
+      # Loopback-only: host dev + live pytest reach localhost:6333, not the LAN
+      # (WR-02). Qdrant ships no auth, so LAN exposure is the real risk here.
+      - "127.0.0.1:6333:6333"
     volumes:
       - qdrant_storage:/qdrant/storage
     # No healthcheck: the qdrant/qdrant image ships no curl and its endpoint is
