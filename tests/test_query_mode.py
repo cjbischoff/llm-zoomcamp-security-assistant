@@ -88,8 +88,11 @@ def test_default_routes_to_hybrid_rerank(mocker, collect_stream):
     out = "".join(collect_stream(pipeline.stream_answer(query="what is prompt injection?")))
 
     assert out == "MODEL ANSWER"
-    assert spy.call_args.args[0] == hybrid.retrieve
-    assert spy.call_args.args[-1] is True  # rerank flag
+    # The retrieval leg is off-loop; select it specifically (other to_thread calls
+    # now include embed + the persistence insert — Phase 5 05-02).
+    retrieve_calls = [c for c in spy.call_args_list if c.args and c.args[0] == hybrid.retrieve]
+    assert len(retrieve_calls) == 1
+    assert retrieve_calls[0].args[-1] is True  # rerank flag
     retriever.retrieve.assert_not_called()
 
 
@@ -106,7 +109,8 @@ def test_hybrid_routes_off_loop(mocker, collect_stream):
     ))
 
     assert spy.called
-    assert spy.call_args.args[0] == hybrid.retrieve
+    retrieve_calls = [c for c in spy.call_args_list if c.args and c.args[0] == hybrid.retrieve]
+    assert len(retrieve_calls) == 1  # hybrid leg routed off-loop
     retriever.retrieve.assert_not_called()
 
 
@@ -124,7 +128,8 @@ def test_hybrid_rerank_passes_rerank_flag(mocker, collect_stream):
 
     assert spy.called
     # The rerank flag is the last positional arg forwarded to hybrid.retrieve.
-    assert spy.call_args.args[-1] is True
+    retrieve_calls = [c for c in spy.call_args_list if c.args and c.args[0] == hybrid.retrieve]
+    assert retrieve_calls[0].args[-1] is True
 
 
 def test_unknown_mode_normalizes_to_dense(mocker, collect_stream):

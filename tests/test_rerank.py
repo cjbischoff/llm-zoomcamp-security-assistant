@@ -104,4 +104,7 @@ def test_rerank_off_loop(mocker, collect_stream):
     ))
 
     assert spy.called  # the blocking leg went off the event loop
-    assert spy.call_args.args[0] == hybrid.retrieve  # ...and it was the hybrid retrieve
+    # Select the hybrid-retrieve to_thread call specifically (other off-loop calls
+    # now include embed + the persistence insert — Phase 5 05-02).
+    retrieve_calls = [c for c in spy.call_args_list if c.args and c.args[0] == hybrid.retrieve]
+    assert len(retrieve_calls) == 1  # ...and it was the hybrid retrieve

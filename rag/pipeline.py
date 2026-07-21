@@ -1,14 +1,17 @@
 """Full RAG pipeline orchestration"""
 
 import asyncio
+import json
 import logging
 import time
+import uuid
 from typing import AsyncGenerator, Optional
 from rag.rewriter import QueryRewriter
 from rag.retrieval import DenseRetriever, HybridRetriever
 from rag.generator import LLMGenerator
 from ingestion.transforms.embed import Embedder
 from monitoring.logging import QueryLogger
+from monitoring.metrics import queries_total, query_latency, retrieval_scores
 
 logger = logging.getLogger(__name__)
 
@@ -31,13 +34,28 @@ _MSG_REFUSE = (
 class RAGPipeline:
     """End-to-end RAG pipeline with monitoring"""
 
-    def __init__(self):
+    def __init__(self, qdrant_client=None, aopenai=None, openai=None, engine=None):
+        """Compose the pipeline, optionally injecting shared clients (INT-01/D-01).
+
+        Every param defaults to None → today's per-instance self-construction, so
+        the entire Phase 2/3/4 suite (which does ``RAGPipeline()`` then swaps
+        attributes) stays green. When injected, no collaborator constructs a new
+        client on the request path (SC1).
+
+        Args:
+            qdrant_client: Shared sync ``QdrantClient`` for the retrievers
+                (kept sync, wrapped in ``asyncio.to_thread`` on the request path
+                per D-01a — no switch to ``AsyncQdrantClient``).
+            aopenai: Shared ``AsyncOpenAI`` for the generator.
+            openai: Shared sync ``OpenAI`` for the embedder.
+            engine: Shared SQLAlchemy engine for the query/feedback logger.
+        """
         self.rewriter = QueryRewriter()
-        self.embedder = Embedder()
-        self.retriever = DenseRetriever()
-        self.hybrid = HybridRetriever()
-        self.generator = LLMGenerator()
-        self.logger = QueryLogger()
+        self.embedder = Embedder(client=openai)
+        self.retriever = DenseRetriever(client=qdrant_client)
+        self.hybrid = HybridRetriever(client=qdrant_client)
+        self.generator = LLMGenerator(client=aopenai)
+        self.logger = QueryLogger(engine=engine)
 
     async def stream_answer(
         self,
@@ -48,6 +66,7 @@ class RAGPipeline:
         # D-08: hybrid_rerank is the eval winner (hit_rate 84.62%, MRR 0.773) —
         # kept in sync with api.main QueryRequest.retrieval_mode (Pitfall 5).
         retrieval_mode: str = "hybrid_rerank",
+        query_id: Optional[str] = None,
     ) -> AsyncGenerator[str, None]:
         """
         Main pipeline: rewrite → embed → retrieve → gate → generate → log
@@ -67,12 +86,24 @@ class RAGPipeline:
                 (Security V5 — explicit membership, never dynamic dispatch). In
                 the hybrid modes the blocking BM25/RRF/torch work runs off the
                 event loop via :func:`asyncio.to_thread` (BON-01).
+            query_id: Optional caller-supplied id (D-02a). When omitted a uuid4
+                is generated; it is threaded to the persisted query_log row so
+                feedback can reference the same query.
         """
         pipeline_start = time.time()
 
         # Validate the mode at entry; normalize anything unknown to dense (Security V5).
         if retrieval_mode not in _RETRIEVAL_MODES:
             retrieval_mode = "dense"
+
+        # query_id is generated here if the caller didn't supply one, and threaded
+        # through to the persisted query_log row (D-02a) so feedback can tie to it.
+        query_id = query_id or str(uuid.uuid4())
+
+        # Count every served query, refusals included (MON-02). Counter coherence
+        # assumes a single uvicorn worker (Pitfall 3); Grafana-from-Postgres is the
+        # primary path and is unaffected by multi-worker counter fragmentation.
+        queries_total.labels(retrieval_approach=retrieval_mode).inc()
 
         # Step 1: Rewrite query -> detected canonical threat id (or None).
         original_query, detected_id = self.rewriter.rewrite(query)
@@ -125,6 +156,24 @@ class RAGPipeline:
             return
         if not hits or gate_score < SCORE_FLOOR:
             yield _MSG_REFUSE
+            # Persist the refusal (refused=1) — off-loop, never blocks (Pattern 4).
+            total_latency_ms = (time.time() - pipeline_start) * 1000
+            await asyncio.to_thread(
+                self.logger.log_query,
+                query_id=query_id,
+                user_id=user_id,
+                query_text=original_query,
+                rewritten_query=embed_text,
+                detected_threat_id=detected_id,
+                retrieval_mode=retrieval_mode,
+                prompt_variant=prompt_variant,
+                top_score=gate_score,
+                refused=1,
+                retrieval_latency_ms=int(retrieval_latency_ms),
+                total_latency_ms=int(total_latency_ms),
+                answer_length=len(_MSG_REFUSE),
+                sources="[]",
+            )
             return
 
         # Step 4: Build citation-ready numbered context ([threat_id] + source — D-04)
@@ -135,23 +184,40 @@ class RAGPipeline:
         )
 
         # Step 5: Generate answer (streaming) — the LLM sees the original question.
+        # Accumulate tokens (still yielding each unchanged) so answer_length is
+        # known at the end for the persisted row.
+        answer_parts = []
         async for token in self.generator.stream_answer(
             query=query,
             context=context,
             prompt_variant=prompt_variant
         ):
+            answer_parts.append(token)
             yield token
 
-        # Step 6: Log query (persistence is Phase 5)
+        # Step 6: Persist the answered query (refused=0) + observe latency/score.
         total_latency_ms = (time.time() - pipeline_start) * 1000
+        query_latency.labels(retrieval_approach=retrieval_mode).observe(total_latency_ms / 1000)
+        retrieval_scores.observe(gate_score)
 
-        self.logger.log_query(
+        cited = [
+            h["metadata"].get("threat_id")
+            for h in hits
+            if h.get("metadata", {}).get("threat_id")
+        ]
+        await asyncio.to_thread(
+            self.logger.log_query,
+            query_id=query_id,
             user_id=user_id,
             query_text=original_query,
             rewritten_query=embed_text,
+            detected_threat_id=detected_id,
+            retrieval_mode=retrieval_mode,
+            prompt_variant=prompt_variant,
+            top_score=gate_score,
+            refused=0,
             retrieval_latency_ms=int(retrieval_latency_ms),
-            retrieval_approach=retrieval_mode,
-            top_5_scores=[h.get("score", 0) for h in hits[:5]],
             total_latency_ms=int(total_latency_ms),
-            prompt_variant=prompt_variant
+            answer_length=len("".join(answer_parts)),
+            sources=json.dumps(cited),
         )
