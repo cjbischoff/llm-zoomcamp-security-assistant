@@ -11,8 +11,16 @@ logger = logging.getLogger(__name__)
 class LLMGenerator:
     """Generate answers using OpenAI API"""
 
-    def __init__(self, model: str = "gpt-4o-mini"):
-        self.client = AsyncOpenAI(api_key=os.getenv("OPENAI_API_KEY"))
+    def __init__(self, model: str = "gpt-4o-mini", client=None):
+        """Create a generator, optionally reusing an injected AsyncOpenAI client.
+
+        Args:
+            model: Chat model id (default ``gpt-4o-mini``).
+            client: An optional shared ``AsyncOpenAI`` (INT-01 injection). When
+                None, today's per-instance client is constructed from env — the
+                injected path builds no new client (SC1).
+        """
+        self.client = client if client is not None else AsyncOpenAI(api_key=os.getenv("OPENAI_API_KEY"))
         self.model = model
 
     async def stream_answer(

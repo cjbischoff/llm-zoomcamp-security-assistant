@@ -27,11 +27,20 @@ def _tokenize(text: str) -> List[str]:
 class DenseRetriever:
     """Dense vector search using cosine similarity"""
 
-    def __init__(self, collection_name: Optional[str] = None):
+    def __init__(self, collection_name: Optional[str] = None, client: Optional[QdrantClient] = None):
+        """Create a dense retriever, optionally reusing an injected Qdrant client.
+
+        Args:
+            collection_name: Qdrant collection to search. Defaults to env
+                ``QDRANT_COLLECTION_NAME``.
+            client: An optional shared ``QdrantClient`` (INT-01 injection). When
+                None, today's per-instance client is constructed from env — the
+                injected path builds no new client (SC1).
+        """
         self.collection_name = collection_name or os.getenv("QDRANT_COLLECTION_NAME", "security_rag")
         self.qdrant_host = os.getenv("QDRANT_HOST", "localhost")
         self.qdrant_port = int(os.getenv("QDRANT_PORT", 6333))
-        self.client = QdrantClient(
+        self.client = client if client is not None else QdrantClient(
             host=self.qdrant_host, port=self.qdrant_port, check_compatibility=False
         )
 
@@ -100,7 +109,12 @@ class BM25Retriever:
     Phase 5 (INT-01) — do not pull forward.
     """
 
-    def __init__(self, docs: Optional[List[Dict[str, Any]]] = None, collection_name: Optional[str] = None):
+    def __init__(
+        self,
+        docs: Optional[List[Dict[str, Any]]] = None,
+        collection_name: Optional[str] = None,
+        client: Optional[QdrantClient] = None,
+    ):
         """Build the BM25 index eagerly from ``docs``, or defer to a lazy scroll.
 
         Args:
@@ -108,8 +122,12 @@ class BM25Retriever:
                 the index is built immediately (unit-test seam / injection).
             collection_name: Qdrant collection to scroll when ``docs`` is None.
                 Defaults to env ``QDRANT_COLLECTION_NAME``.
+            client: An optional shared ``QdrantClient`` (INT-01 injection). When
+                provided, the lazy scroll reuses it instead of constructing a
+                throwaway client (Pitfall 1); None keeps today's behavior.
         """
         self.collection_name = collection_name or os.getenv("QDRANT_COLLECTION_NAME", "security_rag")
+        self._client = client
         self._bm25 = None
         self._ids: List[Any] = []
         self._docs: List[Dict[str, Any]] = []
@@ -138,9 +156,13 @@ class BM25Retriever:
         if self._bm25 is not None:
             return
 
-        host = os.getenv("QDRANT_HOST", "localhost")
-        port = int(os.getenv("QDRANT_PORT", 6333))
-        client = QdrantClient(host=host, port=port, check_compatibility=False)
+        # Reuse the injected shared client (Pitfall 1) or fall back to a
+        # per-instance client built from env when standalone.
+        client = self._client
+        if client is None:
+            host = os.getenv("QDRANT_HOST", "localhost")
+            port = int(os.getenv("QDRANT_PORT", 6333))
+            client = QdrantClient(host=host, port=port, check_compatibility=False)
 
         docs: List[Dict[str, Any]] = []
         offset = None
@@ -278,10 +300,19 @@ class Reranker:
 class HybridRetriever:
     """Hybrid search combining dense + BM25 with RRF fusion and cross-encoder reranking"""
 
-    def __init__(self, collection_name: Optional[str] = None):
+    def __init__(self, collection_name: Optional[str] = None, client: Optional[QdrantClient] = None):
+        """Compose dense + BM25 retrievers, threading a shared client into both.
+
+        Args:
+            collection_name: Qdrant collection. Defaults to env
+                ``QDRANT_COLLECTION_NAME``.
+            client: An optional shared ``QdrantClient`` (INT-01 injection),
+                forwarded into BOTH the dense and BM25 legs so no leg builds its
+                own client (SC1 / Pitfall 1). None keeps today's behavior.
+        """
         self.collection_name = collection_name or os.getenv("QDRANT_COLLECTION_NAME", "security_rag")
-        self.dense = DenseRetriever(collection_name)
-        self.bm25 = BM25Retriever(collection_name=self.collection_name)
+        self.dense = DenseRetriever(collection_name, client=client)
+        self.bm25 = BM25Retriever(collection_name=self.collection_name, client=client)
         self._reranker = None  # lazy: built on first rerank=True call
 
     def retrieve(

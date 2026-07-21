@@ -13,8 +13,16 @@ _BATCH_SIZE = 100
 class Embedder:
     """Embed chunks using text-embedding-3-small (native 1536-dim)."""
 
-    def __init__(self, model: str = "text-embedding-3-small"):
-        self.client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
+    def __init__(self, model: str = "text-embedding-3-small", client=None):
+        """Create an embedder, optionally reusing an injected OpenAI client.
+
+        Args:
+            model: Embedding model id (default ``text-embedding-3-small``).
+            client: An optional shared sync ``OpenAI`` (INT-01 injection). When
+                None, today's per-instance client is constructed from env — the
+                injected path builds no new client (SC1).
+        """
+        self.client = client if client is not None else OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
         self.model = model
         self.embedding_dim = 1536  # native width of text-embedding-3-small
 
