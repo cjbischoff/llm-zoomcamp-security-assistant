@@ -184,6 +184,46 @@ if st.button("🔍 Ask", type="primary", use_container_width=True):
             st.session_state.pop("query_id", None)
             st.error(QUERY_FAILED_MSG)
 
+def _post_feedback(query_id: str, rating: int) -> None:
+    """POST a thumbs vote to ``/feedback`` and confirm only on a real 2xx.
+
+    Shows the success copy only when the API returns a 2xx (the scaffold's fake
+    success toast is prohibited); any non-2xx or transport failure shows the
+    fixed failure copy and leaves the buttons active to retry. On success the
+    vote is recorded in ``st.session_state`` keyed by ``query_id`` so the
+    controls hide for the current answer. Raw exception text is never rendered.
+
+    Args:
+        query_id: The id returned by ``/query`` for the answered question.
+        rating: +1 for Helpful, -1 for Not helpful (the API bounds this to a
+            Literal[-1, 1] at the trust boundary).
+    """
+    try:
+        response = httpx.post(
+            f"{api_url}/feedback",
+            json={"query_id": query_id, "rating": rating},
+            timeout=10.0,
+        )
+        response.raise_for_status()
+    except (httpx.HTTPStatusError, httpx.TransportError):
+        st.error(FEEDBACK_FAILURE_MSG)
+        return
+    st.session_state.setdefault("voted", {})[query_id] = True
+    st.success(FEEDBACK_SUCCESS_MSG)
+
+
+# Feedback region — appears only after a successful answer with a real query_id.
+_query_id = st.session_state.get("query_id")
+if _query_id and not st.session_state.get("voted", {}).get(_query_id):
+    st.subheader("Was this helpful?")
+    fb_col1, fb_col2 = st.columns(2)
+    with fb_col1:
+        if st.button("👍 Helpful", use_container_width=True):
+            _post_feedback(_query_id, 1)
+    with fb_col2:
+        if st.button("👎 Not helpful", use_container_width=True):
+            _post_feedback(_query_id, -1)
+
 # Footer
 st.divider()
 st.markdown(
