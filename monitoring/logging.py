@@ -1,58 +1,64 @@
 """Query logging and instrumentation"""
 
-import os
-import json
-from datetime import datetime
-from typing import List, Optional
 import logging
+
+from sqlalchemy import insert
+
+from monitoring.db import feedback_log, query_log
 
 logger = logging.getLogger(__name__)
 
 
 class QueryLogger:
-    """Log queries to PostgreSQL for monitoring"""
+    """Persist queries/feedback to Postgres via parameterized Core inserts.
 
-    def __init__(self):
-        self.postgres_url = os.getenv("POSTGRES_URL")
-        self.connection = None
-        self._init_tables()
+    The engine is injected (INT-01). These methods are SYNCHRONOUS — the async
+    pipeline offloads them via :func:`asyncio.to_thread` (Pattern 4). Only
+    ``query_id`` is ever logged; the connection string, DB password, and API key
+    are never logged (T-05-02). All SQL is a bound ``insert().values()`` — no raw
+    SQL string is ever constructed (T-05-01).
+    """
 
-    def _init_tables(self):
-        """Initialize database schema"""
-        # Placeholder: in production, would create tables via SQLAlchemy
-        logger.info("Database schema initialized")
+    def __init__(self, engine=None):
+        """Store the injected engine.
 
-    def log_query(
-        self,
-        user_id: Optional[str],
-        query_text: str,
-        rewritten_query: str,
-        retrieval_latency_ms: int,
-        retrieval_approach: str,
-        top_5_scores: List[float],
-        total_latency_ms: int,
-        prompt_variant: str = "base"
-    ):
-        """Log a query to the database"""
-        log_entry = {
-            "timestamp": datetime.utcnow().isoformat(),
-            "user_id": user_id,
-            "query_text": query_text,
-            "rewritten_query": rewritten_query,
-            "retrieval_latency_ms": retrieval_latency_ms,
-            "retrieval_approach": retrieval_approach,
-            "top_5_scores": top_5_scores,
-            "total_latency_ms": total_latency_ms,
-            "prompt_variant": prompt_variant
-        }
+        Args:
+            engine: A SQLAlchemy sync ``Engine``. When None, inserts are a safe
+                offline no-op (keeps unit tests network-free; never crashes).
+        """
+        self.engine = engine
 
-        # Placeholder: would write to postgres
-        logger.info(f"Query logged: {json.dumps(log_entry)}")
+    def log_query(self, **row):
+        """Insert one query row into ``query_log`` (parameterized, T-05-01).
 
-    def log_feedback(self, query_id: str, feedback: int):
-        """Log user feedback (-1, 0, or 1)"""
-        # Placeholder: would update postgres
-        logger.info(f"Feedback logged for query {query_id}: {feedback}")
+        Args:
+            **row: Column values for ``query_log`` — e.g. ``query_id``,
+                ``user_id``, ``query_text``, ``rewritten_query``,
+                ``detected_threat_id``, ``retrieval_mode``, ``prompt_variant``,
+                ``top_score``, ``refused``, ``retrieval_latency_ms``,
+                ``total_latency_ms``, ``answer_length``, ``sources``. Unspecified
+                columns take their DB defaults. When the engine is None this is a
+                no-op that logs only ``query_id``.
+        """
+        if self.engine is None:
+            logger.info("Query logged (no engine): %s", row.get("query_id"))
+            return
+        with self.engine.begin() as conn:
+            conn.execute(insert(query_log).values(**row))
+
+    def log_feedback(self, query_id: str, rating: int):
+        """Insert one feedback row into ``feedback_log`` (parameterized, T-05-01).
+
+        Args:
+            query_id: The query this feedback references (plain column, no FK).
+            rating: Thumbs value (+1 / -1). When the engine is None this is a
+                no-op that logs only ``query_id``.
+        """
+        if self.engine is None:
+            logger.info("Feedback logged (no engine): %s", query_id)
+            return
+        with self.engine.begin() as conn:
+            conn.execute(insert(feedback_log).values(query_id=query_id, rating=rating))
 
 
 class MetricsCollector:
