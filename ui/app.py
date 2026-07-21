@@ -136,7 +136,9 @@ def _render_sources(answer: str) -> None:
         answer: The full streamed answer text returned by ``st.write_stream``.
     """
     st.subheader("Sources")
-    with st.container(border=True):
+    # st.container(border=) needs Streamlit >= 1.29; the pin is 1.28.1, so use a
+    # plain container (visual border omitted, structure/behavior unchanged).
+    with st.container():
         if any(marker in answer for marker in _REFUSAL_MARKERS):
             st.info(NO_CITATIONS_MSG)
             return
@@ -173,7 +175,15 @@ if st.button("🔍 Ask", type="primary", use_container_width=True):
         try:
             st.subheader("Answer")
             with st.spinner(SPINNER_MSG):
-                answer = st.write_stream(_stream_answer(payload))
+                # Incremental render compatible with the pinned Streamlit 1.28.1
+                # (st.write_stream was added in 1.31). Accumulate chunks into a
+                # single placeholder so the answer streams token-by-token; the
+                # generator sets st.session_state["query_id"] as a side effect.
+                _answer_box = st.empty()
+                answer = ""
+                for _chunk in _stream_answer(payload):
+                    answer += _chunk
+                    _answer_box.markdown(answer)
             _render_sources(answer)
         except (httpx.ConnectError, httpx.TimeoutException):
             # SC4: API down / unreachable — visible red error, no answer/sources.
