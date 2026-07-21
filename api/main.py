@@ -1,12 +1,28 @@
 """FastAPI application for security RAG system"""
 
+import asyncio
 import os
 import logging
+import uuid
+from contextlib import asynccontextmanager
 from typing import AsyncGenerator, Literal, Optional
-from fastapi import FastAPI, HTTPException
-from fastapi.responses import JSONResponse, StreamingResponse
+from fastapi import FastAPI, HTTPException, Request
+from fastapi.responses import JSONResponse, Response, StreamingResponse
 from pydantic import BaseModel, Field
 from dotenv import load_dotenv
+
+# Shared-client constructors imported at module top so the lifespan builds them
+# once and tests can patch api.main.<Name> (SC1/D-01). The sync QdrantClient is
+# deliberate (D-01a): least churn to the working Phase-3 retrieval — it already
+# runs off-loop via asyncio.to_thread; the load-bearing requirement is
+# built-once-not-per-request, which injection satisfies.
+from qdrant_client import QdrantClient
+from openai import AsyncOpenAI, OpenAI
+from sqlalchemy import create_engine, text
+from prometheus_client import generate_latest, CONTENT_TYPE_LATEST
+
+from monitoring.db import metadata
+from monitoring.metrics import user_feedback
 
 load_dotenv()
 
@@ -14,10 +30,46 @@ load_dotenv()
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """Build the shared clients exactly once at startup and park them on app.state.
+
+    Constructs QdrantClient, AsyncOpenAI, OpenAI, and a SQLAlchemy engine a single
+    time (SC1/D-01) rather than per request, creates the query/feedback tables
+    idempotently (``create_all(checkfirst=True)`` — D-02), yields for the app's
+    lifetime, then closes the Qdrant client and disposes the engine on shutdown.
+    Single-worker assumption for in-process counter coherence (Pitfall 3).
+
+    Args:
+        app: The FastAPI application whose ``state`` receives the clients.
+
+    Yields:
+        None: Control returns to the running application while clients live.
+    """
+    app.state.qdrant = QdrantClient(
+        host=os.getenv("QDRANT_HOST", "localhost"),
+        port=int(os.getenv("QDRANT_PORT", 6333)),
+        check_compatibility=False,
+    )
+    app.state.aopenai = AsyncOpenAI(api_key=os.getenv("OPENAI_API_KEY"))
+    app.state.openai = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
+    # pool_pre_ping guards against stale pooled connections (T-05-14).
+    app.state.engine = create_engine(os.environ["POSTGRES_URL"], pool_pre_ping=True)
+    # Idempotent DDL — no-op when the tables already exist (D-02).
+    metadata.create_all(app.state.engine, checkfirst=True)
+    try:
+        yield
+    finally:
+        app.state.qdrant.close()
+        app.state.engine.dispose()
+
+
 app = FastAPI(
     title="Security RAG API",
     description="AI-powered threat intelligence RAG system",
-    version="1.0.0"
+    version="1.0.0",
+    lifespan=lifespan,
 )
 
 
@@ -91,17 +143,38 @@ async def health_check():
 
 
 @app.post("/query")
-async def query_endpoint(request: QueryRequest):
-    """
-    Query the security RAG system.
+async def query_endpoint(request: QueryRequest, http: Request):
+    """Query the security RAG system, streaming answer tokens as they arrive.
 
-    Streams answer tokens as they arrive.
+    Mints a per-request uuid ``query_id`` (D-02a), rides it on the ``X-Query-Id``
+    response header, and threads the SAME id into the pipeline so the persisted
+    query row and any later feedback row share one id. The per-request
+    ``RAGPipeline`` receives the lifespan-built clients from ``app.state`` — no
+    client is constructed on the request path (SC1).
+
+    The try/except cannot wrap the streaming body once it starts: the pipeline
+    already degrades retrieval/OpenAI outages to fixed, non-leaking messages
+    inside the stream (D-03). Setup errors before streaming still return a
+    generic 500 (WR-02 / T-02-12).
+
+    Args:
+        request: The validated ``QueryRequest`` body (query cap + enum modes).
+        http: The FastAPI ``Request``, used to reach ``app.state`` clients.
+
+    Returns:
+        StreamingResponse: ``text/plain`` token stream with an ``X-Query-Id`` header.
     """
     try:
         # Import pipeline (lazy import to avoid circular dependencies)
         from rag.pipeline import RAGPipeline
 
-        pipeline = RAGPipeline()
+        query_id = str(uuid.uuid4())
+        pipeline = RAGPipeline(
+            qdrant_client=http.app.state.qdrant,
+            aopenai=http.app.state.aopenai,
+            openai=http.app.state.openai,
+            engine=http.app.state.engine,
+        )
 
         async def answer_generator() -> AsyncGenerator[str, None]:
             """Stream answer from pipeline"""
@@ -109,11 +182,16 @@ async def query_endpoint(request: QueryRequest):
                 query=request.query,
                 user_id=request.user_id,
                 prompt_variant=request.prompt_variant,
-                retrieval_mode=request.retrieval_mode
+                retrieval_mode=request.retrieval_mode,
+                query_id=query_id,
             ):
                 yield token
 
-        return StreamingResponse(answer_generator(), media_type="text/plain")
+        return StreamingResponse(
+            answer_generator(),
+            media_type="text/plain",
+            headers={"X-Query-Id": query_id},
+        )
 
     except Exception:
         # Log detail server-side; return a generic message so raw exception
