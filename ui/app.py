@@ -8,6 +8,7 @@ static placeholder answer or a fake feedback toast (both prohibited by the
 UI-SPEC).
 """
 
+import os
 import re
 
 import streamlit as st
@@ -72,7 +73,7 @@ with st.sidebar:
         index=2,
         help="How passages are retrieved. hybrid_rerank is the default (eval winner).",
     )
-    api_url = st.text_input("API URL", value="http://localhost:8000")
+    api_url = st.text_input("API URL", value=os.getenv("API_URL", "http://localhost:8000"))
 
 # Main content
 col1, col2 = st.columns([3, 1])
@@ -136,9 +137,7 @@ def _render_sources(answer: str) -> None:
         answer: The full streamed answer text returned by ``st.write_stream``.
     """
     st.subheader("Sources")
-    # st.container(border=) needs Streamlit >= 1.29; the pin is 1.28.1, so use a
-    # plain container (visual border omitted, structure/behavior unchanged).
-    with st.container():
+    with st.container(border=True):
         if any(marker in answer for marker in _REFUSAL_MARKERS):
             st.info(NO_CITATIONS_MSG)
             return
@@ -175,15 +174,10 @@ if st.button("🔍 Ask", type="primary", use_container_width=True):
         try:
             st.subheader("Answer")
             with st.spinner(SPINNER_MSG):
-                # Incremental render compatible with the pinned Streamlit 1.28.1
-                # (st.write_stream was added in 1.31). Accumulate chunks into a
-                # single placeholder so the answer streams token-by-token; the
-                # generator sets st.session_state["query_id"] as a side effect.
-                _answer_box = st.empty()
-                answer = ""
-                for _chunk in _stream_answer(payload):
-                    answer += _chunk
-                    _answer_box.markdown(answer)
+                # Native token-by-token render; returns the full concatenated
+                # answer. The generator sets st.session_state["query_id"] on
+                # context entry as a side effect.
+                answer = st.write_stream(_stream_answer(payload))
             _render_sources(answer)
         except (httpx.ConnectError, httpx.TimeoutException):
             # SC4: API down / unreachable — visible red error, no answer/sources.
