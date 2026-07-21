@@ -8,6 +8,7 @@ collection, then verifies a non-zero exact count.
 
 import os
 import sys
+import time
 import uuid
 import hashlib
 import argparse
@@ -117,11 +118,21 @@ def run_pipeline(sources: str = "all", clear_qdrant: bool = False):
     qdrant_port = int(os.getenv("QDRANT_PORT", 6333))
     collection_name = os.getenv("QDRANT_COLLECTION_NAME", "security_rag")
 
-    try:
-        client = QdrantClient(host=qdrant_host, port=qdrant_port)
-        logger.info("Connected to Qdrant at %s:%s", qdrant_host, qdrant_port)
-    except Exception as e:
-        logger.error("Failed to connect to Qdrant: %s", e)
+    # Bounded wait-for-Qdrant: the ingest container starts on `service_started`
+    # (not healthy — the image has no usable healthcheck), so Qdrant may not
+    # accept connections yet. Retry get_collections() as a real readiness
+    # round-trip; only give up (sys.exit) after the loop exhausts.
+    for attempt in range(30):
+        try:
+            client = QdrantClient(host=qdrant_host, port=qdrant_port, timeout=5)
+            client.get_collections()
+            logger.info("Connected to Qdrant at %s:%s", qdrant_host, qdrant_port)
+            break
+        except Exception as e:  # noqa: BLE001 - transient startup races expected
+            logger.info("Qdrant not ready (attempt %d/30): %s", attempt + 1, e)
+            time.sleep(2)
+    else:
+        logger.error("Qdrant did not become ready after 30 attempts — aborting.")
         sys.exit(1)
 
     if clear_qdrant:
@@ -132,6 +143,19 @@ def run_pipeline(sources: str = "all", clear_qdrant: bool = False):
             logger.warning("Collection clear failed (may not exist): %s", e)
 
     ensure_collection(client, collection_name)
+
+    # Idempotent short-circuit: on a repeat `docker-compose up` the collection is
+    # already populated, so skip the (expensive) fetch/chunk/embed stages. Upserts
+    # are already content-hash idempotent (point_id uuid5); this is the cheap-repeat
+    # optimization on top. A `--clear-qdrant` run intentionally re-ingests.
+    if not clear_qdrant:
+        existing = client.count(collection_name=collection_name, exact=True).count
+        if existing > 0:
+            logger.info(
+                "Collection %s already has %d points — skipping ingest (idempotent).",
+                collection_name, existing,
+            )
+            return
 
     # Lazy heavy imports (kept inside the function so `point_id` /
     # `ensure_collection` stay importable without dlt/openai present).
