@@ -61,6 +61,10 @@ services:
       - "8000:8000"
     environment:
       OPENAI_API_KEY: ${OPENAI_API_KEY}
+      # In-container host is the postgres service name, not localhost (Pitfall 4).
+      # Reuses the demo password already set on the postgres service (T-05-09) —
+      # no new secret introduced; local Docker only per org policy.
+      POSTGRES_URL: postgresql://postgres:password@postgres:5432/security_rag
       DLT_POSTGRES_USER: postgres
       DLT_POSTGRES_PASSWORD: password
       DLT_POSTGRES_HOST: postgres
