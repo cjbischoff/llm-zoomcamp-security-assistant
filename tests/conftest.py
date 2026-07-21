@@ -153,6 +153,46 @@ def qdrant_client():
 
 
 @pytest.fixture
+def pg_engine():
+    """Yield a live sync SQLAlchemy engine, skipping if Postgres is unreachable.
+
+    Mirrors the ``qdrant_client`` skip idiom exactly: reads ``POSTGRES_URL`` from
+    the environment (default ``postgresql://postgres:password@localhost:5432/security_rag``),
+    does one cheap ``SELECT 1`` round-trip to prove the service is up, and calls
+    :func:`pytest.skip` on ANY connection failure so the pure-logic suite still
+    runs in a bare CI environment (skip, never error). ``sqlalchemy`` is imported
+    INSIDE the body so collection never fails when the dep or service is absent.
+
+    Security (T-05-00): the connection URL contains a password — it is never
+    printed, logged, or included in the skip message. Only connectivity is
+    reported.
+
+    Yields:
+        Engine: A connected sync SQLAlchemy engine whose ``SELECT 1`` succeeded.
+    """
+    try:
+        from sqlalchemy import create_engine, text
+    except ImportError:
+        pytest.skip("sqlalchemy not installed")
+
+    url = os.getenv(
+        "POSTGRES_URL", "postgresql://postgres:password@localhost:5432/security_rag"
+    )
+
+    try:
+        engine = create_engine(url, pool_pre_ping=True)
+        # Cheap round-trip proves the service is actually up.
+        with engine.connect() as conn:
+            conn.execute(text("SELECT 1"))
+    except Exception:  # noqa: BLE001 - any connection error → skip (never leak the URL)
+        pytest.skip("Postgres unreachable — live persistence test skipped")
+
+    yield engine
+
+    engine.dispose()
+
+
+@pytest.fixture
 def throwaway_collection(qdrant_client):
     """Provide a unique collection name and delete it on teardown.
 
