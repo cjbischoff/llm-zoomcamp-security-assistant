@@ -34,7 +34,15 @@ _MSG_REFUSE = (
 class RAGPipeline:
     """End-to-end RAG pipeline with monitoring"""
 
-    def __init__(self, qdrant_client=None, aopenai=None, openai=None, engine=None):
+    def __init__(
+        self,
+        qdrant_client=None,
+        aopenai=None,
+        openai=None,
+        engine=None,
+        dense=None,
+        hybrid=None,
+    ):
         """Compose the pipeline, optionally injecting shared clients (INT-01/D-01).
 
         Every param defaults to None → today's per-instance self-construction, so
@@ -42,18 +50,30 @@ class RAGPipeline:
         attributes) stays green. When injected, no collaborator constructs a new
         client on the request path (SC1).
 
+        The ``dense``/``hybrid`` retrievers are injected as prebuilt singletons
+        (CR-01): the FastAPI lifespan builds ONE ``HybridRetriever`` (carrying the
+        expensive BM25 index + cross-encoder) and reuses it across requests, so
+        those are no longer rebuilt per request. When not injected they fall back
+        to per-instance construction from ``qdrant_client`` (test/standalone).
+
         Args:
             qdrant_client: Shared sync ``QdrantClient`` for the retrievers
                 (kept sync, wrapped in ``asyncio.to_thread`` on the request path
-                per D-01a — no switch to ``AsyncQdrantClient``).
+                per D-01a — no switch to ``AsyncQdrantClient``). Used only when
+                ``dense``/``hybrid`` are not injected.
             aopenai: Shared ``AsyncOpenAI`` for the generator.
             openai: Shared sync ``OpenAI`` for the embedder.
             engine: Shared SQLAlchemy engine for the query/feedback logger.
+            dense: Optional prebuilt shared ``DenseRetriever`` (CR-01). Defaults
+                to per-instance construction from ``qdrant_client``.
+            hybrid: Optional prebuilt shared ``HybridRetriever`` (CR-01) carrying
+                the reused BM25 index + reranker. Defaults to per-instance
+                construction from ``qdrant_client``.
         """
         self.rewriter = QueryRewriter()
         self.embedder = Embedder(client=openai)
-        self.retriever = DenseRetriever(client=qdrant_client)
-        self.hybrid = HybridRetriever(client=qdrant_client)
+        self.retriever = dense if dense is not None else DenseRetriever(client=qdrant_client)
+        self.hybrid = hybrid if hybrid is not None else HybridRetriever(client=qdrant_client)
         self.generator = LLMGenerator(client=aopenai)
         self.logger = QueryLogger(engine=engine)
 

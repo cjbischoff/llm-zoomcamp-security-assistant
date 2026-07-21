@@ -2,6 +2,7 @@
 
 import logging
 import os
+import threading
 from typing import Any, Dict, List, Optional
 from qdrant_client import QdrantClient
 from qdrant_client.http.exceptions import ResponseHandlingException, UnexpectedResponse
@@ -102,11 +103,13 @@ class BM25Retriever:
     """BM25 sparse keyword search over the chunk corpus (rank-bm25, in-memory).
 
     The corpus is either injected (unit-test seam) or loaded lazily once per
-    process by scrolling the Qdrant collection. Uses ``BM25Okapi`` with the
+    instance by scrolling the Qdrant collection. Uses ``BM25Okapi`` with the
     shared :func:`_tokenize` at both index and query time.
 
-    ponytail: process-level cache, rebuilt per instance. A shared singleton is
-    Phase 5 (INT-01) — do not pull forward.
+    One instance is shared across requests (built once in the FastAPI lifespan —
+    CR-01). Because retrieval runs under :func:`asyncio.to_thread`, the one-time
+    lazy build is guarded by a lock so concurrent first requests build the index
+    exactly once; after that the index is read-only and lock-free.
     """
 
     def __init__(
@@ -131,6 +134,8 @@ class BM25Retriever:
         self._bm25 = None
         self._ids: List[Any] = []
         self._docs: List[Dict[str, Any]] = []
+        # Guards the one-time lazy _ensure_index build across to_thread workers.
+        self._index_lock = threading.Lock()
         if docs is not None:
             self._build_index(docs)
 
@@ -151,40 +156,48 @@ class BM25Retriever:
 
         Pattern 5: page through the collection with ``scroll`` to pull all
         chunk texts + point ids into memory, then build the index. Cached on the
-        instance so it runs once per process.
+        instance so it runs once. Double-checked locking (CR-01) makes the build
+        safe when concurrent :func:`asyncio.to_thread` workers hit the shared
+        instance simultaneously — only one thread scrolls + builds.
         """
         if self._bm25 is not None:
             return
 
-        # Reuse the injected shared client (Pitfall 1) or fall back to a
-        # per-instance client built from env when standalone.
-        client = self._client
-        if client is None:
-            host = os.getenv("QDRANT_HOST", "localhost")
-            port = int(os.getenv("QDRANT_PORT", 6333))
-            client = QdrantClient(host=host, port=port, check_compatibility=False)
+        with self._index_lock:
+            # Re-check inside the lock: another thread may have built it while
+            # this one waited.
+            if self._bm25 is not None:
+                return
 
-        docs: List[Dict[str, Any]] = []
-        offset = None
-        while True:
-            points, offset = client.scroll(
-                collection_name=self.collection_name,
-                limit=256,
-                offset=offset,
-                with_payload=True,
-                with_vectors=False,
-            )
-            for p in points:
-                payload = p.payload or {}
-                docs.append({
-                    "id": p.id,
-                    "text": payload.get("text", ""),
-                    "metadata": {k: v for k, v in payload.items() if k != "text"},
-                })
-            if offset is None:
-                break
+            # Reuse the injected shared client (Pitfall 1) or fall back to a
+            # per-instance client built from env when standalone.
+            client = self._client
+            if client is None:
+                host = os.getenv("QDRANT_HOST", "localhost")
+                port = int(os.getenv("QDRANT_PORT", 6333))
+                client = QdrantClient(host=host, port=port, check_compatibility=False)
 
-        self._build_index(docs)
+            docs: List[Dict[str, Any]] = []
+            offset = None
+            while True:
+                points, offset = client.scroll(
+                    collection_name=self.collection_name,
+                    limit=256,
+                    offset=offset,
+                    with_payload=True,
+                    with_vectors=False,
+                )
+                for p in points:
+                    payload = p.payload or {}
+                    docs.append({
+                        "id": p.id,
+                        "text": payload.get("text", ""),
+                        "metadata": {k: v for k, v in payload.items() if k != "text"},
+                    })
+                if offset is None:
+                    break
+
+            self._build_index(docs)
 
     def retrieve(self, query: str, top_k: int = 5) -> List[Dict[str, Any]]:
         """Rank the corpus against ``query`` by BM25 score.
@@ -259,17 +272,25 @@ class Reranker:
     def __init__(self):
         """Defer model construction to first use (no download at import/ctor)."""
         self._model = None
+        # Guards the one-time model load across shared to_thread workers (CR-01).
+        self._model_lock = threading.Lock()
 
     def _get_model(self):
         """Construct and cache the pinned cross-encoder on first use.
+
+        The ~80MB model is loaded exactly once and then reused. Double-checked
+        locking (CR-01) prevents concurrent :func:`asyncio.to_thread` workers on
+        the shared instance from each loading their own copy.
 
         Returns:
             The CrossEncoder instance (lazily imported and constructed once).
         """
         if self._model is None:
-            from sentence_transformers import CrossEncoder  # lazy import
+            with self._model_lock:
+                if self._model is None:
+                    from sentence_transformers import CrossEncoder  # lazy import
 
-            self._model = CrossEncoder(self._MODEL_ID)
+                    self._model = CrossEncoder(self._MODEL_ID)
         return self._model
 
     def rerank(
@@ -314,6 +335,8 @@ class HybridRetriever:
         self.dense = DenseRetriever(collection_name, client=client)
         self.bm25 = BM25Retriever(collection_name=self.collection_name, client=client)
         self._reranker = None  # lazy: built on first rerank=True call
+        # Guards the one-time reranker construction across to_thread workers (CR-01).
+        self._reranker_lock = threading.Lock()
 
     def retrieve(
         self,
@@ -364,7 +387,9 @@ class HybridRetriever:
         if rerank:
             try:
                 if self._reranker is None:
-                    self._reranker = Reranker()
+                    with self._reranker_lock:
+                        if self._reranker is None:
+                            self._reranker = Reranker()
                 hits = self._reranker.rerank(query_text, fused, top_k=top_k)
             except Exception as e:  # noqa: BLE001 - degrade, never leak (Security V7)
                 logger.error("Rerank failed, falling back to fused: %s", e)

@@ -23,6 +23,9 @@ from prometheus_client import generate_latest, CONTENT_TYPE_LATEST
 
 from monitoring.db import metadata
 from monitoring.metrics import user_feedback
+# Shared retrievers built once in lifespan (CR-01) so the BM25 index + reranker
+# are reused across requests instead of rebuilt per request.
+from rag.retrieval import DenseRetriever, HybridRetriever
 
 load_dotenv()
 
@@ -41,6 +44,13 @@ async def lifespan(app: FastAPI):
     lifetime, then closes the Qdrant client and disposes the engine on shutdown.
     Single-worker assumption for in-process counter coherence (Pitfall 3).
 
+    Also builds ONE shared ``DenseRetriever`` + ``HybridRetriever`` on
+    ``app.state`` (CR-01) so the expensive BM25 index and cross-encoder reranker
+    are constructed once and reused across requests, not rebuilt per request.
+    The BM25 index is eagerly warmed at startup (best-effort) so the first query
+    does not pay the corpus-scroll cost; a cold/unpopulated corpus fails warming
+    harmlessly and the index builds lazily (lock-guarded) on first use.
+
     Args:
         app: The FastAPI application whose ``state`` receives the clients.
 
@@ -58,6 +68,21 @@ async def lifespan(app: FastAPI):
     app.state.engine = create_engine(os.environ["POSTGRES_URL"], pool_pre_ping=True)
     # Idempotent DDL — no-op when the tables already exist (D-02).
     metadata.create_all(app.state.engine, checkfirst=True)
+
+    # Shared retrievers built once and reused across requests (CR-01). The
+    # HybridRetriever owns the BM25 index + cross-encoder — previously rebuilt on
+    # every request. Both legs receive the shared Qdrant client (no per-request
+    # client construction — SC1).
+    app.state.dense = DenseRetriever(client=app.state.qdrant)
+    app.state.hybrid = HybridRetriever(client=app.state.qdrant)
+    # Best-effort eager warm of the BM25 index so the first hybrid query does not
+    # pay the full corpus scroll. Never fatal: an unpopulated/unreachable corpus
+    # (or a mocked client in tests) just defers to the lock-guarded lazy build.
+    try:
+        app.state.hybrid.bm25._ensure_index()
+    except Exception:
+        logger.warning("BM25 warm at startup failed; will build lazily", exc_info=True)
+
     try:
         yield
     finally:
@@ -200,6 +225,10 @@ async def query_endpoint(request: QueryRequest, http: Request):
             aopenai=http.app.state.aopenai,
             openai=http.app.state.openai,
             engine=http.app.state.engine,
+            # Inject the lifespan-built shared retrievers (CR-01): the BM25 index
+            # and cross-encoder reranker are reused, not rebuilt per request.
+            dense=http.app.state.dense,
+            hybrid=http.app.state.hybrid,
         )
 
         async def answer_generator() -> AsyncGenerator[str, None]:
