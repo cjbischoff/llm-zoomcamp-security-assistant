@@ -42,8 +42,11 @@ services:
     ports:
       - "3000:3000"
     environment:
-      GF_SECURITY_ADMIN_USER: admin
-      GF_SECURITY_ADMIN_PASSWORD: admin
+      # Sourced from the gitignored .env (WR-04) so no admin credential is
+      # hardcoded in a committed file. Defaults keep `docker compose up` working
+      # out of the box for the local demo; override in .env for anything shared.
+      GF_SECURITY_ADMIN_USER: ${GRAFANA_ADMIN_USER:-admin}
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD:-admin}
     volumes:
       - ./monitoring/grafana/provisioning:/etc/grafana/provisioning
       - grafana_storage:/var/lib/grafana
