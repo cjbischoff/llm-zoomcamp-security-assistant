@@ -99,26 +99,39 @@ class HealthResponse(BaseModel):
     services: dict
 
 
+class FeedbackRequest(BaseModel):
+    """Feedback request body tied to a prior query_id (INT-02).
+
+    ``rating`` is bound to ``Literal[-1, 1]`` (thumbs down / up) so an
+    out-of-range value is a 422 at the trust boundary before the handler runs
+    (Security V5, T-05-05).
+    """
+    query_id: str
+    rating: Literal[-1, 1]
+
+
 @app.get("/health")
-async def health_check():
+async def health_check(http: Request):
     """Health check endpoint.
 
     Probes the real dependencies rather than asserting health unconditionally
     (WR-04): a check that cannot fail is worse than none. Qdrant is probed with
-    a short-timeout ``get_collections()``; the OpenAI key is checked for
-    presence (no billed API call). Postgres logging is still a Phase-5
-    placeholder (``monitoring.logging`` does not open a connection yet), so it
-    is reported ``"unverified"`` rather than falsely ``"connected"``.
+    an independent short-timeout ``get_collections()``; Postgres is probed with a
+    ``SELECT 1`` on the shared ``app.state.engine`` (offloaded via
+    ``asyncio.to_thread``); the OpenAI key is checked for presence (no billed
+    call). The connection string, DB password, and API key are never logged
+    (T-05-07).
 
-    Returns a 503 when a critical dependency (Qdrant) is unreachable so
-    orchestration/monitoring can restart or alert.
+    Qdrant and Postgres are both critical: a 503 is returned when either is
+    unreachable so orchestration/monitoring can restart or alert.
+
+    Args:
+        http: The FastAPI ``Request``, used to reach the shared engine.
     """
     services = {}
 
-    # Qdrant — the one live, critical dependency for retrieval.
+    # Qdrant — critical retrieval dependency; independent short-timeout probe.
     try:
-        from qdrant_client import QdrantClient
-
         client = QdrantClient(
             host=os.getenv("QDRANT_HOST", "localhost"),
             port=int(os.getenv("QDRANT_PORT", 6333)),
@@ -131,13 +144,26 @@ async def health_check():
         logger.error("Health check: Qdrant probe failed", exc_info=True)
         services["qdrant"] = "unavailable"
 
+    # Postgres — critical persistence dependency; SELECT 1 on the shared engine.
+    def _probe_pg():
+        with http.app.state.engine.connect() as conn:
+            conn.execute(text("SELECT 1"))
+
+    try:
+        await asyncio.to_thread(_probe_pg)
+        services["postgres"] = "connected"
+    except Exception:
+        logger.error("Health check: Postgres probe failed", exc_info=True)
+        services["postgres"] = "unavailable"
+
     # OpenAI — presence check only; a live call would bill every health probe.
     services["openai"] = "configured" if os.getenv("OPENAI_API_KEY") else "unconfigured"
 
-    # Postgres logging is a Phase-5 placeholder — no connection to probe yet.
-    services["postgres"] = "unverified"
-
-    healthy = services["qdrant"] == "connected" and services["openai"] == "configured"
+    healthy = (
+        services["qdrant"] == "connected"
+        and services["postgres"] == "connected"
+        and services["openai"] == "configured"
+    )
     payload = {"status": "healthy" if healthy else "degraded", "services": services}
     return JSONResponse(status_code=200 if healthy else 503, content=payload)
 
@@ -202,15 +228,30 @@ async def query_endpoint(request: QueryRequest, http: Request):
 
 
 @app.post("/feedback")
-async def feedback_endpoint(query_id: str, feedback: int):
-    """
-    Log user feedback (-1: not helpful, 0: neutral, 1: helpful)
+async def feedback_endpoint(body: FeedbackRequest, http: Request):
+    """Persist a thumbs rating for a prior query and increment the counter (INT-02).
+
+    The ``rating`` is validated as ``Literal[-1, 1]`` on ``FeedbackRequest`` (a
+    malformed/out-of-range body is a 422 before this runs — Security V5). The
+    insert runs off the event loop via ``asyncio.to_thread`` using the shared
+    ``app.state.engine`` (T-05-14). Unexpected errors return a generic 500 with
+    detail logged server-side (T-05-06); secrets are never logged (T-05-07).
+
+    Args:
+        body: The validated ``{query_id, rating}`` feedback body.
+        http: The FastAPI ``Request``, used to reach the shared engine.
+
+    Returns:
+        dict: ``{"status": "logged"}`` on success.
     """
     try:
         from monitoring.logging import QueryLogger
 
-        logger_instance = QueryLogger()
-        logger_instance.log_feedback(query_id, feedback)
+        logger_instance = QueryLogger(engine=http.app.state.engine)
+        await asyncio.to_thread(logger_instance.log_feedback, body.query_id, body.rating)
+        user_feedback.labels(
+            feedback_type="positive" if body.rating > 0 else "negative"
+        ).inc()
 
         return {"status": "logged"}
 
@@ -221,16 +262,18 @@ async def feedback_endpoint(query_id: str, feedback: int):
 
 @app.get("/metrics")
 async def metrics_endpoint():
-    """Get current system metrics"""
-    try:
-        from monitoring.metrics import MetricsCollector
+    """Serve the live Prometheus registry in exposition format (INT-03/D-04a).
 
-        collector = MetricsCollector()
-        return collector.get_metrics()
+    Returns the real registered counters (rag_queries_total, rag_user_feedback,
+    latency/score histograms) — not hardcoded zeros. The counters are registered
+    at import in ``monitoring.metrics``.
 
-    except Exception:
-        logger.error("Metrics error", exc_info=True)
-        raise HTTPException(status_code=500, detail="Internal error")
+    Returns:
+        Response: ``generate_latest()`` bytes with ``CONTENT_TYPE_LATEST``.
+    """
+    # Set content-type via header, not media_type: Starlette appends a second
+    # "charset=utf-8" to a text/* media_type, corrupting CONTENT_TYPE_LATEST.
+    return Response(generate_latest(), headers={"Content-Type": CONTENT_TYPE_LATEST})
 
 
 if __name__ == "__main__":
