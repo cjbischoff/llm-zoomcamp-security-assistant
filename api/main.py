@@ -140,10 +140,11 @@ async def health_check(http: Request):
     """Health check endpoint.
 
     Probes the real dependencies rather than asserting health unconditionally
-    (WR-04): a check that cannot fail is worse than none. Qdrant is probed with
-    an independent short-timeout ``get_collections()``; Postgres is probed with a
-    ``SELECT 1`` on the shared ``app.state.engine`` (offloaded via
-    ``asyncio.to_thread``); the OpenAI key is checked for presence (no billed
+    (WR-04): a check that cannot fail is worse than none. Qdrant is probed by
+    reusing the shared ``app.state.qdrant`` client (WR-01 — no per-probe client
+    is constructed or leaked), offloaded via ``asyncio.to_thread``; Postgres is
+    probed with a ``SELECT 1`` on the shared ``app.state.engine`` (also offloaded
+    via ``asyncio.to_thread``); the OpenAI key is checked for presence (no billed
     call). The connection string, DB password, and API key are never logged
     (T-05-07).
 
@@ -151,19 +152,18 @@ async def health_check(http: Request):
     unreachable so orchestration/monitoring can restart or alert.
 
     Args:
-        http: The FastAPI ``Request``, used to reach the shared engine.
+        http: The FastAPI ``Request``, used to reach the shared clients.
     """
     services = {}
 
-    # Qdrant — critical retrieval dependency; independent short-timeout probe.
+    # Qdrant — critical retrieval dependency; reuse the shared lifespan client
+    # (WR-01) rather than building and leaking a throwaway QdrantClient per
+    # probe. Offloaded off the event loop for symmetry with the Postgres probe.
+    def _probe_qdrant():
+        http.app.state.qdrant.get_collections()
+
     try:
-        client = QdrantClient(
-            host=os.getenv("QDRANT_HOST", "localhost"),
-            port=int(os.getenv("QDRANT_PORT", 6333)),
-            timeout=2,
-            check_compatibility=False,
-        )
-        client.get_collections()
+        await asyncio.to_thread(_probe_qdrant)
         services["qdrant"] = "connected"
     except Exception:
         logger.error("Health check: Qdrant probe failed", exc_info=True)
