@@ -144,24 +144,10 @@ def run_pipeline(sources: str = "all", clear_qdrant: bool = False):
 
     ensure_collection(client, collection_name)
 
-    # Idempotent short-circuit: on a repeat `docker-compose up` the collection is
-    # already populated, so skip the (expensive) fetch/chunk/embed stages. Upserts
-    # are already content-hash idempotent (point_id uuid5); this is the cheap-repeat
-    # optimization on top. A `--clear-qdrant` run intentionally re-ingests.
-    if not clear_qdrant:
-        existing = client.count(collection_name=collection_name, exact=True).count
-        if existing > 0:
-            logger.info(
-                "Collection %s already has %d points — skipping ingest (idempotent).",
-                collection_name, existing,
-            )
-            return
-
-    # Lazy heavy imports (kept inside the function so `point_id` /
-    # `ensure_collection` stay importable without dlt/openai present).
-    import dlt
-    from qdrant_client.models import PointStruct
-
+    # Resolve the selected sources up front so the short-circuit below can gate on
+    # completeness rather than mere non-emptiness. The dlt source factories are
+    # only used in Stage 1, but `registry` is defined here so both the gate and
+    # Stage 1 share one source of truth.
     from ingestion.dlt_sources import (
         owasp_llm_source,
         owasp_agentic_source,
@@ -169,10 +155,10 @@ def run_pipeline(sources: str = "all", clear_qdrant: bool = False):
         mcp_security_source,
         nist_ai_rmf_source,
     )
-    from ingestion.transforms.chunk import Chunker
-    from ingestion.transforms.embed import Embedder
 
-    # source key -> (dlt source factory, Postgres staging table name)
+    # source key -> (dlt source factory, Postgres staging table name). The table
+    # name doubles as the per-chunk payload `source` tag (see _chunk_rows), which
+    # the completeness gate below matches on.
     registry = {
         "owasp_llm": (owasp_llm_source, "owasp_llm_top_10"),
         "owasp_agentic": (owasp_agentic_source, "owasp_agentic_top_10"),
@@ -185,6 +171,50 @@ def run_pipeline(sources: str = "all", clear_qdrant: bool = False):
     if unknown:
         logger.error("Unknown source(s): %s (known: %s)", unknown, list(registry))
         sys.exit(1)
+
+    # Completeness-gated idempotent short-circuit: on a repeat `docker-compose up`
+    # skip the expensive fetch/chunk/embed stages ONLY when EVERY selected source
+    # is already present in the collection. Gating on `count > 0` (WR-01) treats a
+    # partial ingest — e.g. 4 of 5 sources staged — as permanently complete and
+    # never retries the missing source, silently leaving the corpus incomplete.
+    # Upserts are content-hash idempotent (point_id uuid5), so re-running to fill a
+    # gap is safe. A `--clear-qdrant` run intentionally re-ingests.
+    if not clear_qdrant:
+        from qdrant_client.models import FieldCondition, Filter, MatchValue
+
+        def _source_present(source_tag: str) -> bool:
+            """Return True if at least one point carries payload ``source == tag``."""
+            return client.count(
+                collection_name=collection_name,
+                exact=True,
+                count_filter=Filter(
+                    must=[FieldCondition(key="source", match=MatchValue(value=source_tag))]
+                ),
+            ).count > 0
+
+        expected_tags = [registry[key][1] for key in selected]
+        missing = [tag for tag in expected_tags if not _source_present(tag)]
+        if not missing:
+            total = client.count(collection_name=collection_name, exact=True).count
+            logger.info(
+                "All %d selected source(s) present in %s (%d points) — skipping ingest (idempotent).",
+                len(selected), collection_name, total,
+            )
+            return
+        existing = client.count(collection_name=collection_name, exact=True).count
+        if existing > 0:
+            logger.warning(
+                "Collection %s has %d points but source(s) %s are missing — re-ingesting to complete the corpus.",
+                collection_name, existing, missing,
+            )
+
+    # Lazy heavy imports (kept inside the function so `point_id` /
+    # `ensure_collection` stay importable without dlt/openai present).
+    import dlt
+    from qdrant_client.models import PointStruct
+
+    from ingestion.transforms.chunk import Chunker
+    from ingestion.transforms.embed import Embedder
 
     # Stage 1: fetch + normalize the sources into Postgres staging.
     # continue-and-report — a single failing source is dropped; the run only
