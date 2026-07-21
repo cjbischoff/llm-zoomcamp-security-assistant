@@ -129,9 +129,11 @@ class FeedbackRequest(BaseModel):
 
     ``rating`` is bound to ``Literal[-1, 1]`` (thumbs down / up) so an
     out-of-range value is a 422 at the trust boundary before the handler runs
-    (Security V5, T-05-05).
+    (Security V5, T-05-05). ``query_id`` is capped at 64 chars (WR-02): the id is
+    a uuid4 (36 chars), so an oversized/junk id is rejected with a 422 before any
+    orphan row is inserted or the feedback counter is incremented.
     """
-    query_id: str
+    query_id: str = Field(..., max_length=64)
     rating: Literal[-1, 1]
 
 
