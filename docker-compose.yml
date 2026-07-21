@@ -67,7 +67,9 @@ services:
     environment:
       QDRANT_HOST: qdrant
       QDRANT_PORT: 6333
-      QDRANT_COLLECTION_NAME: security_rag
+      # QDRANT_COLLECTION_NAME intentionally NOT overridden here (WR-05): both
+      # `ingest` and `app` resolve it from the shared env_file .env so they can't
+      # silently diverge. Falls back to the code default "security_rag" if unset.
       # In-container host is the postgres service name, not localhost (Pitfall 4).
       POSTGRES_URL: postgresql://postgres:password@postgres:5432/security_rag
       DLT_POSTGRES_USER: postgres
