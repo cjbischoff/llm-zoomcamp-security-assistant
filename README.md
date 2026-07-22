@@ -20,9 +20,7 @@ Security engineers reasoning about LLM/agent threats have to cross-reference sev
 
 ![API-down error state](docs/img/ui-api-down.png)
 
-**Grafana monitoring** — live query/feedback traffic from Postgres:
-
-![Grafana dashboard](docs/img/grafana-dashboard.png)
+(Live monitoring dashboard shown under [Monitoring](#monitoring).)
 
 ## Evaluation
 
@@ -57,7 +55,11 @@ pytest -q
 
 ## Monitoring
 
-Every query and feedback vote persists to Postgres (`query_log`, `feedback_log`) via parameterized SQLAlchemy Core inserts run off the event loop. A `query_id` returned in the `X-Query-Id` response header ties each feedback row to its query. Grafana provisions a **6-panel dashboard** over the Postgres datasource (query volume, latency, retrieval-mode distribution, positive-feedback ratio, prompt-variant split, refusal rate — screenshot above). The FastAPI `/metrics` endpoint also exposes real Prometheus counters. Seed representative traffic with `python scripts/seed_queries.py`.
+Every query and feedback vote persists to Postgres (`query_log`, `feedback_log`) via parameterized SQLAlchemy Core inserts run off the event loop. A `query_id` returned in the `X-Query-Id` response header ties each feedback row to its query. Grafana provisions a **6-panel dashboard** over the Postgres datasource. The FastAPI `/metrics` endpoint also exposes real Prometheus counters. Seed representative traffic with `python scripts/seed_queries.py`.
+
+![Grafana dashboard](docs/img/grafana-dashboard.png)
+
+Panels: query volume over time, average latency, retrieval-mode distribution, positive-feedback ratio, prompt-variant split, and refusal rate.
 
 ## Quickstart (Docker)
 
