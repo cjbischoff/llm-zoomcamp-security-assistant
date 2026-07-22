@@ -1,0 +1,120 @@
+{
+  "title": "Security RAG Monitoring",
+  "uid": "security-rag",
+  "schemaVersion": 39,
+  "version": 1,
+  "editable": true,
+  "time": { "from": "now-6h", "to": "now" },
+  "refresh": "30s",
+  "timezone": "browser",
+  "panels": [
+    {
+      "id": 1,
+      "title": "Query Volume Over Time",
+      "type": "timeseries",
+      "datasource": { "type": "grafana-postgresql-datasource", "uid": "PostgreSQL" },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 0 },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "type": "grafana-postgresql-datasource", "uid": "PostgreSQL" },
+          "format": "time_series",
+          "rawSql": "SELECT $__timeGroupAlias(created_at, '1m'), count(*) AS queries FROM query_log WHERE $__timeFilter(created_at) GROUP BY 1 ORDER BY 1"
+        }
+      ]
+    },
+    {
+      "id": 2,
+      "title": "Avg Total Latency Over Time",
+      "type": "timeseries",
+      "datasource": { "type": "grafana-postgresql-datasource", "uid": "PostgreSQL" },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 0 },
+      "fieldConfig": { "defaults": { "unit": "ms" }, "overrides": [] },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "type": "grafana-postgresql-datasource", "uid": "PostgreSQL" },
+          "format": "time_series",
+          "rawSql": "SELECT $__timeGroupAlias(created_at, '1m'), avg(total_latency_ms) AS latency_ms FROM query_log WHERE $__timeFilter(created_at) GROUP BY 1 ORDER BY 1"
+        }
+      ]
+    },
+    {
+      "id": 3,
+      "title": "Retrieval-Mode Distribution",
+      "type": "piechart",
+      "datasource": { "type": "grafana-postgresql-datasource", "uid": "PostgreSQL" },
+      "gridPos": { "h": 8, "w": 8, "x": 0, "y": 8 },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "type": "grafana-postgresql-datasource", "uid": "PostgreSQL" },
+          "format": "table",
+          "rawSql": "SELECT retrieval_mode, count(*) AS queries FROM query_log GROUP BY retrieval_mode ORDER BY queries DESC"
+        }
+      ]
+    },
+    {
+      "id": 4,
+      "title": "Positive Feedback Ratio",
+      "type": "gauge",
+      "datasource": { "type": "grafana-postgresql-datasource", "uid": "PostgreSQL" },
+      "gridPos": { "h": 8, "w": 8, "x": 8, "y": 8 },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percentunit",
+          "min": 0,
+          "max": 1,
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "red", "value": null },
+              { "color": "yellow", "value": 0.5 },
+              { "color": "green", "value": 0.75 }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "type": "grafana-postgresql-datasource", "uid": "PostgreSQL" },
+          "format": "table",
+          "rawSql": "SELECT avg((rating > 0)::int)::float AS positive_ratio FROM feedback_log"
+        }
+      ]
+    },
+    {
+      "id": 5,
+      "title": "Prompt-Variant Split",
+      "type": "table",
+      "datasource": { "type": "grafana-postgresql-datasource", "uid": "PostgreSQL" },
+      "gridPos": { "h": 8, "w": 8, "x": 16, "y": 8 },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "type": "grafana-postgresql-datasource", "uid": "PostgreSQL" },
+          "format": "table",
+          "rawSql": "SELECT prompt_variant, count(*) AS queries FROM query_log GROUP BY prompt_variant ORDER BY queries DESC"
+        }
+      ]
+    },
+    {
+      "id": 6,
+      "title": "Refusal Rate Over Time",
+      "type": "timeseries",
+      "datasource": { "type": "grafana-postgresql-datasource", "uid": "PostgreSQL" },
+      "gridPos": { "h": 8, "w": 24, "x": 0, "y": 16 },
+      "fieldConfig": { "defaults": { "unit": "percentunit", "min": 0, "max": 1 }, "overrides": [] },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "type": "grafana-postgresql-datasource", "uid": "PostgreSQL" },
+          "format": "time_series",
+          "rawSql": "SELECT $__timeGroupAlias(created_at, '5m'), avg(refused::float) AS refusal_rate FROM query_log WHERE $__timeFilter(created_at) GROUP BY 1 ORDER BY 1"
+        }
+      ]
+    }
+  ]
+}

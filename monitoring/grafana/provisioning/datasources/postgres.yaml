@@ -1,0 +1,19 @@
+apiVersion: 1
+
+datasources:
+  - name: PostgreSQL
+    uid: PostgreSQL
+    type: postgres
+    access: proxy
+    url: postgres:5432
+    user: postgres
+    database: security_rag
+    isDefault: true
+    editable: true
+    jsonData:
+      database: security_rag
+      sslmode: disable
+      postgresVersion: 1500
+      timescaledb: false
+    secureJsonData:
+      password: password

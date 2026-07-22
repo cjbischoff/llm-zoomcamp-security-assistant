@@ -1,0 +1,149 @@
+services:
+  postgres:
+    image: postgres:15-alpine
+    container_name: security_rag_postgres
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: password
+      POSTGRES_DB: security_rag
+    ports:
+      # Loopback-only: host dev + live pytest reach localhost:5432, but the
+      # datastore is not exposed to the LAN (WR-02). Internal compose services
+      # reach it over security_rag_net regardless.
+      - "127.0.0.1:5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - security_rag_net
+
+  qdrant:
+    image: qdrant/qdrant:latest
+    container_name: security_rag_qdrant
+    ports:
+      # Loopback-only: host dev + live pytest reach localhost:6333, not the LAN
+      # (WR-02). Qdrant ships no auth, so LAN exposure is the real risk here.
+      - "127.0.0.1:6333:6333"
+    volumes:
+      - qdrant_storage:/qdrant/storage
+    # No healthcheck: the qdrant/qdrant image ships no curl and its endpoint is
+    # /healthz (not /health), so the old curl check could never pass. Readiness
+    # is proven instead by the one-shot `ingest` service completing successfully.
+    networks:
+      - security_rag_net
+
+  grafana:
+    image: grafana/grafana:latest
+    container_name: security_rag_grafana
+    ports:
+      - "3000:3000"
+    environment:
+      # Sourced from the gitignored .env (WR-04) so no admin credential is
+      # hardcoded in a committed file. Defaults keep `docker compose up` working
+      # out of the box for the local demo; override in .env for anything shared.
+      GF_SECURITY_ADMIN_USER: ${GRAFANA_ADMIN_USER:-admin}
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD:-admin}
+    volumes:
+      - ./monitoring/grafana/provisioning:/etc/grafana/provisioning
+      - grafana_storage:/var/lib/grafana
+    depends_on:
+      postgres:
+        condition: service_healthy
+    networks:
+      - security_rag_net
+
+  ingest:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: security_rag_ingest
+    command: ["python", "ingestion/run_pipeline.py", "--sources", "all"]
+    restart: "no"
+    env_file: .env
+    environment:
+      QDRANT_HOST: qdrant
+      QDRANT_PORT: 6333
+      # QDRANT_COLLECTION_NAME intentionally NOT overridden here (WR-05): both
+      # `ingest` and `app` resolve it from the shared env_file .env so they can't
+      # silently diverge. Falls back to the code default "security_rag" if unset.
+      # In-container host is the postgres service name, not localhost (Pitfall 4).
+      POSTGRES_URL: postgresql://postgres:password@postgres:5432/security_rag
+      DLT_POSTGRES_USER: postgres
+      DLT_POSTGRES_PASSWORD: password
+      DLT_POSTGRES_HOST: postgres
+      DLT_POSTGRES_PORT: 5432
+      DLT_POSTGRES_DATABASE: security_rag
+    depends_on:
+      postgres:
+        condition: service_healthy
+      qdrant:
+        condition: service_started
+    volumes:
+      - ./data:/app/data
+    networks:
+      - security_rag_net
+
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: security_rag_app
+    ports:
+      - "8000:8000"
+    env_file: .env
+    environment:
+      OPENAI_API_KEY: ${OPENAI_API_KEY}
+      # In-container host is the postgres service name, not localhost (Pitfall 4).
+      # Reuses the demo password already set on the postgres service (T-05-09) —
+      # no new secret introduced; local Docker only per org policy.
+      POSTGRES_URL: postgresql://postgres:password@postgres:5432/security_rag
+      DLT_POSTGRES_USER: postgres
+      DLT_POSTGRES_PASSWORD: password
+      DLT_POSTGRES_HOST: postgres
+      DLT_POSTGRES_PORT: 5432
+      DLT_POSTGRES_DATABASE: security_rag
+      QDRANT_HOST: qdrant
+      QDRANT_PORT: 6333
+    depends_on:
+      postgres:
+        condition: service_healthy
+      ingest:
+        condition: service_completed_successfully
+    volumes:
+      - ./data:/app/data
+    networks:
+      - security_rag_net
+
+  ui:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: security_rag_ui
+    command: ["streamlit", "run", "ui/app.py", "--server.port", "8501", "--server.address", "0.0.0.0"]
+    ports:
+      - "8501:8501"
+    env_file: .env
+    environment:
+      # Compose service name, NOT localhost — inside the ui container localhost
+      # resolves to the ui container itself, not the API.
+      API_URL: http://app:8000
+    depends_on:
+      ingest:
+        condition: service_completed_successfully
+      app:
+        condition: service_started
+    networks:
+      - security_rag_net
+
+volumes:
+  postgres_data:
+  qdrant_storage:
+  grafana_storage:
+
+networks:
+  security_rag_net:
+    driver: bridge

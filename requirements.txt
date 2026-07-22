@@ -1,0 +1,51 @@
+# Core dependencies
+python-dotenv==1.0.1
+pydantic==2.5.0
+pydantic-settings==2.1.0
+
+# dlt (Data Load Tool) for orchestrated ingestion
+# dlt 1.x dropped the `connectors` extra; `[postgres]` is the load-bearing extra.
+dlt[postgres]==1.29.0
+
+# Data processing
+pandas>=2,<3
+pypdf==6.14.2
+beautifulsoup4==4.12.2
+requests==2.31.0
+markdownify==0.11.6
+
+# Vector search & embeddings
+qdrant-client==1.18.0
+sentence-transformers==5.6.0
+openai==2.45.0
+
+# Token counting for chunk size cap (D-03)
+tiktoken==0.13.0
+
+# Cross-encoder for reranking
+rank-bm25==0.2.2
+
+# API & Web
+fastapi==0.109.0
+uvicorn[standard]==0.27.0
+streamlit>=1.31
+aiofiles==23.2.1
+
+# Monitoring & Logging
+psycopg2-binary==2.9.9
+sqlalchemy==2.0.23
+prometheus-client==0.19.0
+
+# Evaluation & Testing
+scikit-learn==1.9.0
+# numpy-2-safe: streamlit's numpy<2 cap lifts at >=1.31, so scikit-learn moves to
+# 1.9.0 (Phase 6 reconciliation); numpy floor kept, lock decides if it floats to 2.x
+numpy>=1.26
+
+# Development
+python-multipart==0.0.6
+httpx==0.28.1
+
+# Development / tests
+pytest
+pytest-mock
